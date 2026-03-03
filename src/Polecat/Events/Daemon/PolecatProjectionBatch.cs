@@ -3,6 +3,7 @@ using JasperFx.Events;
 using JasperFx.Events.Daemon;
 using JasperFx.Events.Projections;
 using Microsoft.Data.SqlClient;
+using Polly;
 using Polecat.Internal;
 using Weasel.SqlServer;
 
@@ -12,12 +13,14 @@ namespace Polecat.Events.Daemon;
 ///     Implements IProjectionBatch for the async daemon.
 ///     Accumulates operations from multiple tenant sessions and flushes them in one SQL transaction.
 ///     Thread-safe: composite projections may call SessionForTenant concurrently.
+///     All SQL execution is wrapped with Polly resilience.
 /// </summary>
 internal class PolecatProjectionBatch : IProjectionBatch<IDocumentSession, IQuerySession>
 {
     private readonly DocumentStore _store;
     private readonly EventGraph _events;
     private readonly string _connectionString;
+    private readonly ResiliencePipeline _resilience;
     private readonly ConcurrentBag<IDocumentSession> _sessions = new();
     private readonly ConcurrentQueue<ProgressOperation> _progressOps = new();
 
@@ -26,6 +29,7 @@ internal class PolecatProjectionBatch : IProjectionBatch<IDocumentSession, IQuer
         _store = store;
         _events = events;
         _connectionString = connectionString;
+        _resilience = store.Options.ResiliencePipeline;
     }
 
     public IDocumentSession SessionForTenant(string tenantId)
@@ -43,115 +47,118 @@ internal class PolecatProjectionBatch : IProjectionBatch<IDocumentSession, IQuer
 
     public async Task ExecuteAsync(CancellationToken token)
     {
-        await using var conn = new SqlConnection(_connectionString);
-        await conn.OpenAsync(token);
-        await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(token);
-
-        try
+        await _resilience.ExecuteAsync(async (_, ct) =>
         {
-            // Ensure document tables exist for projected types
-            var tableEnsurer = new DocumentTableEnsurer(
-                new ConnectionFactory(_connectionString), _store.Options);
+            await using var conn = new SqlConnection(_connectionString);
+            await conn.OpenAsync(ct);
+            await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(ct);
 
-            // Collect all operations from all sessions and progress ops into a single batch
-            var allOps = new List<IStorageOperation>();
-
-            foreach (var session in _sessions)
+            try
             {
-                if (session is DocumentSessionBase sessionBase)
+                // Ensure document tables exist for projected types
+                var tableEnsurer = new DocumentTableEnsurer(
+                    new ConnectionFactory(_connectionString), _store.Options);
+
+                // Collect all operations from all sessions and progress ops into a single batch
+                var allOps = new List<IStorageOperation>();
+
+                foreach (var session in _sessions)
                 {
-                    var workTracker = sessionBase.WorkTracker;
-
-                    // Ensure projected document tables exist (skip non-document ops like FlatTable)
-                    if (workTracker.Operations.Count > 0)
+                    if (session is DocumentSessionBase sessionBase)
                     {
-                        var providers = workTracker.Operations
-                            .Select(op => op.DocumentType)
-                            .Where(t => t != typeof(object))
-                            .Distinct()
-                            .Select(t => _store.GetProvider(t));
-                        await tableEnsurer.EnsureTablesAsync(providers, token);
+                        var workTracker = sessionBase.WorkTracker;
 
-                        allOps.AddRange(workTracker.Operations);
+                        // Ensure projected document tables exist (skip non-document ops like FlatTable)
+                        if (workTracker.Operations.Count > 0)
+                        {
+                            var providers = workTracker.Operations
+                                .Select(op => op.DocumentType)
+                                .Where(t => t != typeof(object))
+                                .Distinct()
+                                .Select(t => _store.GetProvider(t));
+                            await tableEnsurer.EnsureTablesAsync(providers, ct);
+
+                            allOps.AddRange(workTracker.Operations);
+                        }
                     }
                 }
+
+                // Execute all document operations + progress operations in a single SqlBatch
+                var progressArray = _progressOps.ToArray();
+                var totalCommands = allOps.Count + progressArray.Length;
+
+                if (totalCommands > 0)
+                {
+                    await using var batch = new SqlBatch(conn);
+                    batch.Transaction = tx;
+                    var builder = new BatchBuilder(batch);
+
+                    var commandIndex = 0;
+
+                    // Document operations
+                    foreach (var operation in allOps)
+                    {
+                        if (commandIndex > 0) builder.StartNewCommand();
+                        operation.ConfigureCommand(builder);
+                        commandIndex++;
+                    }
+
+                    // Progress operations
+                    foreach (var progressOp in progressArray)
+                    {
+                        if (commandIndex > 0) builder.StartNewCommand();
+
+                        if (progressOp.Floor == 0)
+                        {
+                            builder.Append($"""
+                                MERGE {_events.ProgressionTableName} AS target
+                                USING (SELECT @name AS name) AS source ON target.name = source.name
+                                WHEN MATCHED THEN UPDATE SET last_seq_id = @seq, last_updated = SYSDATETIMEOFFSET()
+                                WHEN NOT MATCHED THEN INSERT (name, last_seq_id, last_updated)
+                                    VALUES (@name, @seq, SYSDATETIMEOFFSET());
+                                """);
+                        }
+                        else
+                        {
+                            builder.Append($"""
+                                UPDATE {_events.ProgressionTableName}
+                                SET last_seq_id = @seq, last_updated = SYSDATETIMEOFFSET()
+                                WHERE name = @name;
+                                """);
+                        }
+
+                        builder.AddParameters(new Dictionary<string, object?>
+                        {
+                            ["name"] = progressOp.Name,
+                            ["seq"] = progressOp.Ceiling
+                        });
+
+                        commandIndex++;
+                    }
+
+                    builder.Compile();
+                    await using var reader = await batch.ExecuteReaderAsync(ct);
+
+                    // Process document operation results
+                    for (var i = 0; i < allOps.Count; i++)
+                    {
+                        await allOps[i].PostprocessAsync(reader, ct);
+                        if (i < totalCommands - 1)
+                        {
+                            await reader.NextResultAsync(ct);
+                        }
+                    }
+                    // Progress ops don't need result processing
+                }
+
+                await tx.CommitAsync(ct);
             }
-
-            // Execute all document operations + progress operations in a single SqlBatch
-            var progressArray = _progressOps.ToArray();
-            var totalCommands = allOps.Count + progressArray.Length;
-
-            if (totalCommands > 0)
+            catch
             {
-                await using var batch = new SqlBatch(conn);
-                batch.Transaction = tx;
-                var builder = new BatchBuilder(batch);
-
-                var commandIndex = 0;
-
-                // Document operations
-                foreach (var operation in allOps)
-                {
-                    if (commandIndex > 0) builder.StartNewCommand();
-                    operation.ConfigureCommand(builder);
-                    commandIndex++;
-                }
-
-                // Progress operations
-                foreach (var progressOp in progressArray)
-                {
-                    if (commandIndex > 0) builder.StartNewCommand();
-
-                    if (progressOp.Floor == 0)
-                    {
-                        builder.Append($"""
-                            MERGE {_events.ProgressionTableName} AS target
-                            USING (SELECT @name AS name) AS source ON target.name = source.name
-                            WHEN MATCHED THEN UPDATE SET last_seq_id = @seq, last_updated = SYSDATETIMEOFFSET()
-                            WHEN NOT MATCHED THEN INSERT (name, last_seq_id, last_updated)
-                                VALUES (@name, @seq, SYSDATETIMEOFFSET());
-                            """);
-                    }
-                    else
-                    {
-                        builder.Append($"""
-                            UPDATE {_events.ProgressionTableName}
-                            SET last_seq_id = @seq, last_updated = SYSDATETIMEOFFSET()
-                            WHERE name = @name;
-                            """);
-                    }
-
-                    builder.AddParameters(new Dictionary<string, object?>
-                    {
-                        ["name"] = progressOp.Name,
-                        ["seq"] = progressOp.Ceiling
-                    });
-
-                    commandIndex++;
-                }
-
-                builder.Compile();
-                await using var reader = await batch.ExecuteReaderAsync(token);
-
-                // Process document operation results
-                for (var i = 0; i < allOps.Count; i++)
-                {
-                    await allOps[i].PostprocessAsync(reader, token);
-                    if (i < totalCommands - 1)
-                    {
-                        await reader.NextResultAsync(token);
-                    }
-                }
-                // Progress ops don't need result processing
+                await tx.RollbackAsync(ct);
+                throw;
             }
-
-            await tx.CommitAsync(token);
-        }
-        catch
-        {
-            await tx.RollbackAsync(token);
-            throw;
-        }
+        }, token);
     }
 
     public void QuickAppendEventWithVersion(StreamAction action, IEvent @event)

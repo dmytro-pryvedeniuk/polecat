@@ -15,6 +15,7 @@ namespace Polecat.Linq;
 
 /// <summary>
 ///     IQueryProvider that translates LINQ expression trees into SQL Server queries.
+///     All SQL execution routes through session's Polly-wrapped centralized methods.
 /// </summary>
 internal class PolecatLinqQueryProvider : IQueryProvider
 {
@@ -134,18 +135,12 @@ internal class PolecatLinqQueryProvider : IQueryProvider
 
         ApplyModifiedFilters(parser);
 
-        var conn = await _session.GetConnectionAsync(token);
-        await using var batch = new SqlBatch(conn);
-        if (_session.ActiveTransaction != null)
-        {
-            batch.Transaction = _session.ActiveTransaction;
-        }
-
+        await using var batch = new SqlBatch();
         var builder = new BatchBuilder(batch);
         parser.Statement.Apply(builder);
         builder.Compile();
 
-        await using var reader = await batch.ExecuteReaderAsync(token);
+        await using var reader = await _session.ExecuteReaderAsync(batch, token);
 
         var sb = new StringBuilder("[");
         var first = true;
@@ -242,18 +237,12 @@ internal class PolecatLinqQueryProvider : IQueryProvider
         }
 
         // Build SQL and execute via BatchBuilder/SqlBatch
-        var conn = await _session.GetConnectionAsync(token);
-        await using var batch = new SqlBatch(conn);
-        if (_session.ActiveTransaction != null)
-        {
-            batch.Transaction = _session.ActiveTransaction;
-        }
-
+        await using var batch = new SqlBatch();
         var builder = new BatchBuilder(batch);
         parser.Statement.Apply(builder);
         builder.Compile();
 
-        await using var reader = await batch.ExecuteReaderAsync(token);
+        await using var reader = await _session.ExecuteReaderAsync(batch, token);
 
         return await HandleResultAsync<TResult>(reader, parser, documentType, token, syncRevision, syncGuidVersion);
     }
@@ -519,6 +508,7 @@ internal class PolecatLinqQueryProvider : IQueryProvider
         {
             token.ThrowIfCancellationRequested();
 
+            // Use auto-closing connections for polling (independent of session lifetime)
             await using var conn = new SqlConnection(options.ConnectionString);
             await conn.OpenAsync(token);
 

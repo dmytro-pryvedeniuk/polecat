@@ -1,8 +1,11 @@
+using System.Data.Common;
 using JasperFx;
 using Microsoft.Data.SqlClient;
+using Polly;
 using Polecat.Batching;
 using Polecat.Events;
 using Polecat.Internal.Batching;
+using Polecat.Internal.Sessions;
 using Polecat.Linq;
 using Polecat.Logging;
 using Polecat.Metadata;
@@ -11,20 +14,21 @@ using Polecat.Serialization;
 namespace Polecat.Internal;
 
 /// <summary>
-///     Read-only query session. Opens a lazy connection and executes load queries.
+///     Read-only query session. All SQL execution flows through Polly-wrapped
+///     centralized methods backed by IConnectionLifetime.
 /// </summary>
 internal class QuerySession : IQuerySession
 {
-    private readonly ConnectionFactory _connectionFactory;
+    internal readonly IConnectionLifetime _lifetime;
+    private readonly ResiliencePipeline _resilience;
     protected readonly DocumentProviderRegistry _providers;
     protected readonly DocumentTableEnsurer _tableEnsurer;
     protected readonly EventGraph _eventGraph;
-    private SqlConnection? _connection;
     private QueryEventStore? _events;
 
     public QuerySession(
         StoreOptions options,
-        ConnectionFactory connectionFactory,
+        IConnectionLifetime lifetime,
         DocumentProviderRegistry providers,
         DocumentTableEnsurer tableEnsurer,
         EventGraph eventGraph,
@@ -33,7 +37,8 @@ internal class QuerySession : IQuerySession
         Options = options;
         Serializer = options.Serializer;
         TenantId = tenantId;
-        _connectionFactory = connectionFactory;
+        _lifetime = lifetime;
+        _resilience = options.ResiliencePipeline;
         _providers = providers;
         _tableEnsurer = tableEnsurer;
         _eventGraph = eventGraph;
@@ -49,28 +54,47 @@ internal class QuerySession : IQuerySession
     public string? LastModifiedBy { get; set; }
     public int RequestCount { get; internal set; }
     public IPolecatSessionLogger Logger { get; set; }
-    internal virtual SqlTransaction? ActiveTransaction { get => null; set { } }
 
     public IQueryEventStore Events => _events ??= new QueryEventStore(this, _eventGraph, Options);
 
-    internal async Task<SqlConnection> GetConnectionAsync(CancellationToken token)
-    {
-        if (_connection == null)
-        {
-            _connection = _connectionFactory.Create();
-            await _connection.OpenAsync(token);
-        }
+    // ── Centralized Polly-wrapped execution methods ──────────────────────
 
-        return _connection;
+    private record CommandExecution(SqlCommand Command, IConnectionLifetime Lifetime);
+    private record BatchExecution(SqlBatch Batch, IConnectionLifetime Lifetime);
+
+    internal Task<int> ExecuteAsync(SqlCommand command, CancellationToken token)
+    {
+        RequestCount++;
+        return _resilience.ExecuteAsync(
+            static (state, t) => new ValueTask<int>(state.Lifetime.ExecuteAsync(state.Command, t)),
+            new CommandExecution(command, _lifetime), token).AsTask();
     }
 
-    /// <summary>
-    ///     Enlists a command in the active transaction if one exists.
-    /// </summary>
-    internal void EnlistInTransaction(SqlCommand cmd)
+    internal Task<object?> ExecuteScalarAsync(SqlCommand command, CancellationToken token)
     {
-        if (ActiveTransaction != null) cmd.Transaction = ActiveTransaction;
+        RequestCount++;
+        return _resilience.ExecuteAsync(
+            static (state, t) => new ValueTask<object?>(state.Lifetime.ExecuteScalarAsync(state.Command, t)),
+            new CommandExecution(command, _lifetime), token).AsTask();
     }
+
+    internal Task<DbDataReader> ExecuteReaderAsync(SqlCommand command, CancellationToken token)
+    {
+        RequestCount++;
+        return _resilience.ExecuteAsync(
+            static (state, t) => new ValueTask<DbDataReader>(state.Lifetime.ExecuteReaderAsync(state.Command, t)),
+            new CommandExecution(command, _lifetime), token).AsTask();
+    }
+
+    internal Task<DbDataReader> ExecuteReaderAsync(SqlBatch batch, CancellationToken token)
+    {
+        RequestCount++;
+        return _resilience.ExecuteAsync(
+            static (state, t) => new ValueTask<DbDataReader>(state.Lifetime.ExecuteReaderAsync(state.Batch, t)),
+            new BatchExecution(batch, _lifetime), token).AsTask();
+    }
+
+    // ── Load operations ─────────────────────────────────────────────────
 
     public async Task<T?> LoadAsync<T>(Guid id, CancellationToken token = default) where T : class
     {
@@ -97,9 +121,7 @@ internal class QuerySession : IQuerySession
         var provider = _providers.GetProvider<T>();
         await _tableEnsurer.EnsureTableAsync(provider, token);
 
-        var conn = await GetConnectionAsync(token);
-        await using var cmd = conn.CreateCommand();
-        EnlistInTransaction(cmd);
+        await using var cmd = new SqlCommand();
         cmd.CommandText = provider.LoadSql;
         cmd.Parameters.AddWithValue("@id", id);
         cmd.Parameters.AddWithValue("@tenant_id", TenantId);
@@ -107,8 +129,7 @@ internal class QuerySession : IQuerySession
         Logger.OnBeforeExecute(cmd.CommandText);
         try
         {
-            await using var reader = await cmd.ExecuteReaderAsync(token);
-            RequestCount++;
+            await using var reader = await ExecuteReaderAsync(cmd, token);
             Logger.LogSuccess(cmd.CommandText);
 
             if (await reader.ReadAsync(token))
@@ -149,9 +170,7 @@ internal class QuerySession : IQuerySession
         var provider = _providers.GetProvider<T>();
         await _tableEnsurer.EnsureTableAsync(provider, token);
 
-        var conn = await GetConnectionAsync(token);
-        await using var cmd = conn.CreateCommand();
-        EnlistInTransaction(cmd);
+        await using var cmd = new SqlCommand();
 
         var paramNames = new string[ids.Count];
         for (var i = 0; i < ids.Count; i++)
@@ -170,8 +189,7 @@ internal class QuerySession : IQuerySession
         try
         {
             var results = new List<T>();
-            await using var reader = await cmd.ExecuteReaderAsync(token);
-            RequestCount++;
+            await using var reader = await ExecuteReaderAsync(cmd, token);
             Logger.LogSuccess(cmd.CommandText);
 
             while (await reader.ReadAsync(token))
@@ -225,9 +243,7 @@ internal class QuerySession : IQuerySession
         var provider = _providers.GetProvider<T>();
         await _tableEnsurer.EnsureTableAsync(provider, token);
 
-        var conn = await GetConnectionAsync(token);
-        await using var cmd = conn.CreateCommand();
-        EnlistInTransaction(cmd);
+        await using var cmd = new SqlCommand();
 
         var softDeleteFilter = provider.Mapping.DeleteStyle == Metadata.DeleteStyle.SoftDelete
             ? " AND is_deleted = 0"
@@ -240,8 +256,7 @@ internal class QuerySession : IQuerySession
         Logger.OnBeforeExecute(cmd.CommandText);
         try
         {
-            var result = await cmd.ExecuteScalarAsync(token);
-            RequestCount++;
+            var result = await ExecuteScalarAsync(cmd, token);
             Logger.LogSuccess(cmd.CommandText);
             return result is string json ? json : null;
         }
@@ -267,7 +282,7 @@ internal class QuerySession : IQuerySession
     ///     Syncs version/revision properties from the DB columns to the document object.
     ///     SelectSql column layout: id[0], data[1], version[2], last_modified[3], dotnet_type[4], tenant_id[5], guid_version[6]?
     /// </summary>
-    internal static void SyncVersionProperties<T>(T doc, System.Data.Common.DbDataReader reader, DocumentProvider provider) where T : class
+    internal static void SyncVersionProperties<T>(T doc, DbDataReader reader, DocumentProvider provider) where T : class
     {
         if (provider.Mapping.UseNumericRevisions && doc is IRevisioned revisioned)
         {
@@ -284,7 +299,7 @@ internal class QuerySession : IQuerySession
     ///     Syncs tenant_id from the DB column to ITenanted documents.
     ///     tenant_id is at column index 5 in SelectSql.
     /// </summary>
-    internal static void SyncTenantId<T>(T doc, System.Data.Common.DbDataReader reader) where T : class
+    internal static void SyncTenantId<T>(T doc, DbDataReader reader) where T : class
     {
         if (doc is ITenanted tenanted)
         {
@@ -294,10 +309,6 @@ internal class QuerySession : IQuerySession
 
     public virtual async ValueTask DisposeAsync()
     {
-        if (_connection != null)
-        {
-            await _connection.DisposeAsync();
-            _connection = null;
-        }
+        await _lifetime.DisposeAsync();
     }
 }

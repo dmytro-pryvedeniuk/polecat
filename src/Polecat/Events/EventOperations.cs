@@ -1,4 +1,5 @@
 using JasperFx.Events;
+using Microsoft.Data.SqlClient;
 using Polecat.Internal;
 using Polecat.Internal.Operations;
 
@@ -242,20 +243,13 @@ internal class EventOperations : QueryEventStore, IEventOperations
             await _sessionBase.BeginTransactionAsync(cancellation);
         }
 
-        var conn = await _sessionBase.GetConnectionAsync(cancellation);
-
         // Query stream version
         long version = 0;
         bool streamExists = false;
         var lockHint = forExclusive ? " WITH (UPDLOCK, HOLDLOCK)" : "";
 
-        await using (var cmd = conn.CreateCommand())
         {
-            if (_sessionBase.ActiveTransaction != null)
-            {
-                cmd.Transaction = _sessionBase.ActiveTransaction;
-            }
-
+            await using var cmd = new SqlCommand();
             cmd.CommandText = $"""
                 SELECT version FROM {_events.StreamsTableName}{lockHint}
                 WHERE id = @id AND tenant_id = @tenant_id;
@@ -263,7 +257,7 @@ internal class EventOperations : QueryEventStore, IEventOperations
             cmd.Parameters.AddWithValue("@id", streamId);
             cmd.Parameters.AddWithValue("@tenant_id", _tenantId);
 
-            var result = await cmd.ExecuteScalarAsync(cancellation);
+            var result = await _sessionBase.ExecuteScalarAsync(cmd, cancellation);
             if (result != null && result != DBNull.Value)
             {
                 version = (long)result;

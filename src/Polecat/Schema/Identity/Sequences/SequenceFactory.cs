@@ -26,7 +26,7 @@ internal class SequenceFactory
     {
         var name = GetSequenceName(documentType, settings);
         return _sequences.GetOrAdd(name,
-            sequenceName => new HiloSequence(_connectionFactory, _options.DatabaseSchemaName, sequenceName, settings));
+            sequenceName => new HiloSequence(_connectionFactory, _options.DatabaseSchemaName, sequenceName, settings, _options.ResiliencePipeline));
     }
 
     private static string GetSequenceName(Type documentType, HiloSettings settings)

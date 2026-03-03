@@ -87,14 +87,8 @@ internal class BatchedQuery : IBatchedQuery
         // Ensure tables exist for all involved document types
         await _tableEnsurer.EnsureTablesAsync(_involvedProviders, token);
 
-        // Build the combined batch
-        var conn = await _session.GetConnectionAsync(token);
-        await using var batch = new SqlBatch(conn);
-        if (_session.ActiveTransaction != null)
-        {
-            batch.Transaction = _session.ActiveTransaction;
-        }
-
+        // Build the combined batch (connection-less; lifetime sets it at execution)
+        await using var batch = new SqlBatch();
         var builder = new BatchBuilder(batch);
         for (var i = 0; i < _items.Count; i++)
         {
@@ -103,7 +97,7 @@ internal class BatchedQuery : IBatchedQuery
         }
 
         builder.Compile();
-        await using var reader = await batch.ExecuteReaderAsync(token);
+        await using var reader = await _session.ExecuteReaderAsync(batch, token);
 
         // Process each result set
         for (var i = 0; i < _items.Count; i++)

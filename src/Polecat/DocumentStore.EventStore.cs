@@ -10,6 +10,7 @@ using JasperFx.Events.Projections;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Polly;
 using Polecat.Events;
 using Polecat.Events.Daemon;
 using Polecat.Projections;
@@ -139,7 +140,8 @@ public partial class DocumentStore : IEventStore<IDocumentSession, IQuerySession
 
         var connStr = db.StoredConnectionString;
         var detector = new PolecatHighWaterDetector(Events, connStr,
-            Options.DaemonSettings, new Logger<PolecatHighWaterDetector>(new LoggerFactory()));
+            Options.DaemonSettings, new Logger<PolecatHighWaterDetector>(new LoggerFactory()),
+            Options.ResiliencePipeline);
 
         return new PolecatProjectionDaemon(this, db, logger, detector);
     }
@@ -158,18 +160,44 @@ public partial class DocumentStore : IEventStore<IDocumentSession, IQuerySession
         IEventDatabase database, string subscriptionName, CancellationToken token, long? sequenceFloor)
     {
         var connStr = ResolveConnectionString(database, Options);
-        await using var conn = new SqlConnection(connStr);
-        await conn.OpenAsync(token);
+        await Options.ResiliencePipeline.ExecuteAsync(async (_, ct) =>
+        {
+            await using var conn = new SqlConnection(connStr);
+            await conn.OpenAsync(ct);
 
-        if (sequenceFloor is null or 0)
+            if (sequenceFloor is null or 0)
+            {
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = $"DELETE FROM {Events.ProgressionTableName} WHERE name LIKE @name;";
+                cmd.Parameters.AddWithValue("@name", subscriptionName + "%");
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+            else
+            {
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = $"""
+                    MERGE {Events.ProgressionTableName} AS target
+                    USING (SELECT @name AS name) AS source ON target.name = source.name
+                    WHEN MATCHED THEN UPDATE SET last_seq_id = @seq, last_updated = SYSDATETIMEOFFSET()
+                    WHEN NOT MATCHED THEN INSERT (name, last_seq_id, last_updated)
+                        VALUES (@name, @seq, SYSDATETIMEOFFSET());
+                    """;
+                cmd.Parameters.AddWithValue("@name", subscriptionName);
+                cmd.Parameters.AddWithValue("@seq", sequenceFloor.Value);
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+        }, token);
+    }
+
+    async Task IEventStore<IDocumentSession, IQuerySession>.RewindAgentProgressAsync(
+        IEventDatabase database, string shardName, CancellationToken token, long sequenceFloor)
+    {
+        var connStr = ResolveConnectionString(database, Options);
+        await Options.ResiliencePipeline.ExecuteAsync(async (_, ct) =>
         {
-            await using var cmd = conn.CreateCommand();
-            cmd.CommandText = $"DELETE FROM {Events.ProgressionTableName} WHERE name LIKE @name;";
-            cmd.Parameters.AddWithValue("@name", subscriptionName + "%");
-            await cmd.ExecuteNonQueryAsync(token);
-        }
-        else
-        {
+            await using var conn = new SqlConnection(connStr);
+            await conn.OpenAsync(ct);
+
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = $"""
                 MERGE {Events.ProgressionTableName} AS target
@@ -178,30 +206,10 @@ public partial class DocumentStore : IEventStore<IDocumentSession, IQuerySession
                 WHEN NOT MATCHED THEN INSERT (name, last_seq_id, last_updated)
                     VALUES (@name, @seq, SYSDATETIMEOFFSET());
                 """;
-            cmd.Parameters.AddWithValue("@name", subscriptionName);
-            cmd.Parameters.AddWithValue("@seq", sequenceFloor.Value);
-            await cmd.ExecuteNonQueryAsync(token);
-        }
-    }
-
-    async Task IEventStore<IDocumentSession, IQuerySession>.RewindAgentProgressAsync(
-        IEventDatabase database, string shardName, CancellationToken token, long sequenceFloor)
-    {
-        var connStr = ResolveConnectionString(database, Options);
-        await using var conn = new SqlConnection(connStr);
-        await conn.OpenAsync(token);
-
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"""
-            MERGE {Events.ProgressionTableName} AS target
-            USING (SELECT @name AS name) AS source ON target.name = source.name
-            WHEN MATCHED THEN UPDATE SET last_seq_id = @seq, last_updated = SYSDATETIMEOFFSET()
-            WHEN NOT MATCHED THEN INSERT (name, last_seq_id, last_updated)
-                VALUES (@name, @seq, SYSDATETIMEOFFSET());
-            """;
-        cmd.Parameters.AddWithValue("@name", shardName);
-        cmd.Parameters.AddWithValue("@seq", sequenceFloor);
-        await cmd.ExecuteNonQueryAsync(token);
+            cmd.Parameters.AddWithValue("@name", shardName);
+            cmd.Parameters.AddWithValue("@seq", sequenceFloor);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }, token);
     }
 
 #pragma warning disable CS0618 // Obsolete member
@@ -222,13 +230,16 @@ public partial class DocumentStore : IEventStore<IDocumentSession, IQuerySession
         IEventDatabase database, string subscriptionName, CancellationToken token)
     {
         var connStr = ResolveConnectionString(database, Options);
-        await using var conn = new SqlConnection(connStr);
-        await conn.OpenAsync(token);
+        await Options.ResiliencePipeline.ExecuteAsync(async (_, ct) =>
+        {
+            await using var conn = new SqlConnection(connStr);
+            await conn.OpenAsync(ct);
 
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"DELETE FROM {Events.ProgressionTableName} WHERE name LIKE @name;";
-        cmd.Parameters.AddWithValue("@name", subscriptionName + "%");
-        await cmd.ExecuteNonQueryAsync(token);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"DELETE FROM {Events.ProgressionTableName} WHERE name LIKE @name;";
+            cmd.Parameters.AddWithValue("@name", subscriptionName + "%");
+            await cmd.ExecuteNonQueryAsync(ct);
+        }, token);
     }
 
     // ISubscriptionRunner<ISubscription>
@@ -257,26 +268,28 @@ public partial class DocumentStore : IEventStore<IDocumentSession, IQuerySession
         CancellationToken token)
     {
         var connStr = ResolveConnectionString(database, Options);
-
-        // Delete projection progress
-        await using var conn = new SqlConnection(connStr);
-        await conn.OpenAsync(token);
-
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"DELETE FROM {Events.ProgressionTableName} WHERE name LIKE @name;";
-        cmd.Parameters.AddWithValue("@name", subscriptionName + "%");
-        await cmd.ExecuteNonQueryAsync(token);
-
-        // If there's a projection source that publishes document types, truncate those tables
-        if (Options.Projections.TryFindProjection(subscriptionName, out var source))
+        await Options.ResiliencePipeline.ExecuteAsync(async (_, ct) =>
         {
-            foreach (var publishedType in source.PublishedTypes())
+            // Delete projection progress
+            await using var conn = new SqlConnection(connStr);
+            await conn.OpenAsync(ct);
+
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"DELETE FROM {Events.ProgressionTableName} WHERE name LIKE @name;";
+            cmd.Parameters.AddWithValue("@name", subscriptionName + "%");
+            await cmd.ExecuteNonQueryAsync(ct);
+
+            // If there's a projection source that publishes document types, truncate those tables
+            if (Options.Projections.TryFindProjection(subscriptionName, out var source))
             {
-                var provider = GetProvider(publishedType);
-                await using var truncCmd = conn.CreateCommand();
-                truncCmd.CommandText = $"DELETE FROM {provider.QualifiedTableName};";
-                await truncCmd.ExecuteNonQueryAsync(token);
+                foreach (var publishedType in source.PublishedTypes())
+                {
+                    var provider = GetProvider(publishedType);
+                    await using var truncCmd = conn.CreateCommand();
+                    truncCmd.CommandText = $"DELETE FROM {provider.QualifiedTableName};";
+                    await truncCmd.ExecuteNonQueryAsync(ct);
+                }
             }
-        }
+        }, token);
     }
 }

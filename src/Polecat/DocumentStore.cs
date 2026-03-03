@@ -1,7 +1,7 @@
 using JasperFx.Events.Projections;
-using Microsoft.Data.SqlClient;
 using Polecat.Events;
 using Polecat.Internal;
+using Polecat.Internal.Sessions;
 using Polecat.Schema.Identity.Sequences;
 using Polecat.Storage;
 
@@ -105,9 +105,10 @@ public partial class DocumentStore : IDocumentStore
     {
         var factory = ResolveConnectionFactory(options.TenantId);
         var ensurer = ReferenceEquals(factory, _connectionFactory) ? _tableEnsurer : new DocumentTableEnsurer(factory, Options);
+        var lifetime = new TransactionalConnection(factory, Options.CommandTimeout);
         return new LightweightSession(
             Options,
-            factory,
+            lifetime,
             _providers,
             ensurer,
             Events,
@@ -125,9 +126,10 @@ public partial class DocumentStore : IDocumentStore
     {
         var factory = ResolveConnectionFactory(options.TenantId);
         var ensurer = ReferenceEquals(factory, _connectionFactory) ? _tableEnsurer : new DocumentTableEnsurer(factory, Options);
+        var lifetime = new TransactionalConnection(factory, Options.CommandTimeout);
         return new IdentityMapDocumentSession(
             Options,
-            factory,
+            lifetime,
             _providers,
             ensurer,
             Events,
@@ -145,9 +147,10 @@ public partial class DocumentStore : IDocumentStore
     {
         var factory = ResolveConnectionFactory(options.TenantId);
         var ensurer = ReferenceEquals(factory, _connectionFactory) ? _tableEnsurer : new DocumentTableEnsurer(factory, Options);
+        var lifetime = new AutoClosingLifetime(factory, Options.CommandTimeout);
         return new Internal.QuerySession(
             Options,
-            factory,
+            lifetime,
             _providers,
             ensurer,
             Events,
@@ -165,16 +168,22 @@ public partial class DocumentStore : IDocumentStore
 
     public async Task<IDocumentSession> OpenSessionAsync(SessionOptions options, CancellationToken token = default)
     {
-        var session = OpenSession(options);
+        var factory = ResolveConnectionFactory(options.TenantId);
+        var ensurer = ReferenceEquals(factory, _connectionFactory) ? _tableEnsurer : new DocumentTableEnsurer(factory, Options);
+        var lifetime = new TransactionalConnection(factory, Options.CommandTimeout);
 
         if (options.IsolationLevel != System.Data.IsolationLevel.ReadCommitted)
         {
-            var sessionBase = (DocumentSessionBase)session;
-            var conn = await sessionBase.GetConnectionAsync(token);
-            sessionBase.ActiveTransaction = (SqlTransaction)await conn.BeginTransactionAsync(options.IsolationLevel, token);
+            await lifetime.BeginTransactionAsync(options.IsolationLevel, token);
         }
 
-        return session;
+        return options.Tracking switch
+        {
+            DocumentTracking.IdentityOnly => new IdentityMapDocumentSession(
+                Options, lifetime, _providers, ensurer, Events, InlineProjections, options.TenantId, options.Listeners),
+            _ => new LightweightSession(
+                Options, lifetime, _providers, ensurer, Events, InlineProjections, options.TenantId, options.Listeners)
+        };
     }
 
     public void Dispose()

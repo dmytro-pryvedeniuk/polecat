@@ -12,6 +12,7 @@ namespace Polecat.Projections;
 /// <summary>
 ///     Adapts Polecat's document session into the IProjectionStorage interface
 ///     that JasperFx.Events uses to persist projected documents.
+///     All SQL execution routes through session's Polly-wrapped centralized methods.
 /// </summary>
 internal class PolecatProjectionStorage<TDoc, TId> : IProjectionStorage<TDoc, TId>
     where TDoc : notnull
@@ -112,14 +113,13 @@ internal class PolecatProjectionStorage<TDoc, TId> : IProjectionStorage<TDoc, TI
     public async Task<TDoc> LoadAsync(TId id, CancellationToken cancellation)
     {
         await EnsureTableExistsAsync(cancellation);
-        var conn = await _session.GetConnectionAsync(cancellation);
-        await using var cmd = conn.CreateCommand();
-        if (_session.ActiveTransaction != null) cmd.Transaction = _session.ActiveTransaction;
+
+        await using var cmd = new SqlCommand();
         cmd.CommandText = _provider.LoadSql;
         cmd.Parameters.AddWithValue("@id", (object)id);
         cmd.Parameters.AddWithValue("@tenant_id", TenantId);
 
-        await using var reader = await cmd.ExecuteReaderAsync(cancellation);
+        await using var reader = await _session.ExecuteReaderAsync(cmd, cancellation);
         if (await reader.ReadAsync(cancellation))
         {
             var json = reader.GetString(1);
@@ -136,9 +136,8 @@ internal class PolecatProjectionStorage<TDoc, TId> : IProjectionStorage<TDoc, TI
         if (identities.Length == 0) return dict;
 
         await EnsureTableExistsAsync(cancellationToken);
-        var conn = await _session.GetConnectionAsync(cancellationToken);
-        await using var cmd = conn.CreateCommand();
-        if (_session.ActiveTransaction != null) cmd.Transaction = _session.ActiveTransaction;
+
+        await using var cmd = new SqlCommand();
 
         var paramNames = new string[identities.Length];
         for (var i = 0; i < identities.Length; i++)
@@ -153,7 +152,7 @@ internal class PolecatProjectionStorage<TDoc, TId> : IProjectionStorage<TDoc, TI
         cmd.CommandText = $"{_provider.SelectSql} WHERE id IN ({string.Join(", ", paramNames)}) AND tenant_id = @tenant_id{softDeleteFilter};";
         cmd.Parameters.AddWithValue("@tenant_id", TenantId);
 
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await _session.ExecuteReaderAsync(cmd, cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
             var json = reader.GetString(1);

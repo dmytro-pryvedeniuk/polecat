@@ -2,9 +2,11 @@ using System.Text.Json;
 using JasperFx;
 using JasperFx.Events;
 using JasperFx.Events.Daemon;
+using Polly;
 using Polecat.Events;
 using Polecat.Internal;
 using Polecat.Projections;
+using Polecat.Resilience;
 using Polecat.Schema.Identity.Sequences;
 using Polecat.Serialization;
 using Polecat.Logging;
@@ -30,6 +32,7 @@ public class StoreOptions
         EventGraph = new EventGraph(this);
         Projections = new PolecatProjectionOptions(EventGraph);
         Projections.SetStoreOptions(this);
+        ResiliencePipeline = new ResiliencePipelineBuilder().AddPolecatDefaults().Build();
     }
 
     /// <summary>
@@ -134,10 +137,38 @@ public class StoreOptions
     internal DocumentProviderRegistry Providers { get; set; } = null!;
 
     /// <summary>
+    ///     The Polly resilience pipeline used for all SQL execution.
+    ///     Defaults to retry on transient SQL Server errors.
+    /// </summary>
+    internal ResiliencePipeline ResiliencePipeline { get; set; }
+
+    /// <summary>
     ///     The tenancy strategy. Defaults to DefaultTenancy (single database).
     ///     Set via MultiTenantedDatabases() for separate database per tenant.
     /// </summary>
     internal ITenancy? Tenancy { get; set; }
+
+    /// <summary>
+    ///     Replace the default Polly resilience pipeline with a custom one.
+    /// </summary>
+    public void ConfigurePolly(Action<ResiliencePipelineBuilder> configure)
+    {
+        var builder = new ResiliencePipelineBuilder();
+        configure(builder);
+        ResiliencePipeline = builder.Build();
+    }
+
+    /// <summary>
+    ///     Extend the default Polly resilience pipeline with additional strategies.
+    ///     The default transient retry is applied first, then your additions.
+    /// </summary>
+    public void ExtendPolly(Action<ResiliencePipelineBuilder> configure)
+    {
+        var builder = new ResiliencePipelineBuilder();
+        builder.AddPolecatDefaults();
+        configure(builder);
+        ResiliencePipeline = builder.Build();
+    }
 
     /// <summary>
     ///     Configure separate database multi-tenancy. Each tenant gets its own

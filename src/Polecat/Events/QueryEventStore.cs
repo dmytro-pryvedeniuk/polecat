@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Reflection;
 using JasperFx.Events;
+using Microsoft.Data.SqlClient;
 using Polecat.Internal;
 using Polecat.Storage;
 
@@ -8,6 +9,7 @@ namespace Polecat.Events;
 
 /// <summary>
 ///     Read-only event store implementation. Fetches events and stream state from the database.
+///     All SQL execution routes through session's Polly-wrapped centralized methods.
 /// </summary>
 internal class QueryEventStore : IQueryEventStore
 {
@@ -40,9 +42,7 @@ internal class QueryEventStore : IQueryEventStore
     private async Task<IReadOnlyList<IEvent>> FetchStreamInternalAsync(object streamId, long version,
         DateTimeOffset? timestamp, long fromVersion, CancellationToken token)
     {
-        var conn = await _session.GetConnectionAsync(token);
-        await using var cmd = conn.CreateCommand();
-        if (_session.ActiveTransaction != null) cmd.Transaction = _session.ActiveTransaction;
+        await using var cmd = new SqlCommand();
 
         var sql = $"""
             SELECT seq_id, id, stream_id, version, data, type, timestamp, tenant_id, dotnet_type, is_archived
@@ -75,7 +75,8 @@ internal class QueryEventStore : IQueryEventStore
         cmd.CommandText = sql;
 
         var results = new List<IEvent>();
-        await using var reader = await cmd.ExecuteReaderAsync(token);
+        await using var dbReader = await _session.ExecuteReaderAsync(cmd, token);
+        var reader = (SqlDataReader)dbReader;
 
         while (await reader.ReadAsync(token))
         {
@@ -133,10 +134,7 @@ internal class QueryEventStore : IQueryEventStore
 
     private async Task<StreamState?> FetchStreamStateInternalAsync(object streamId, CancellationToken token)
     {
-        var conn = await _session.GetConnectionAsync(token);
-        await using var cmd = conn.CreateCommand();
-        if (_session.ActiveTransaction != null) cmd.Transaction = _session.ActiveTransaction;
-
+        await using var cmd = new SqlCommand();
         cmd.CommandText = $"""
             SELECT id, type, version, timestamp, created, tenant_id, is_archived
             FROM {_events.StreamsTableName}
@@ -145,7 +143,8 @@ internal class QueryEventStore : IQueryEventStore
         cmd.Parameters.AddWithValue("@id", streamId);
         cmd.Parameters.AddWithValue("@tenant_id", _session.TenantId);
 
-        await using var reader = await cmd.ExecuteReaderAsync(token);
+        await using var dbReader = await _session.ExecuteReaderAsync(cmd, token);
+        var reader = (SqlDataReader)dbReader;
         if (await reader.ReadAsync(token))
         {
             var version = reader.GetInt64(2);
@@ -153,20 +152,24 @@ internal class QueryEventStore : IQueryEventStore
             var created = reader.GetDateTimeOffset(4);
             var isArchived = reader.GetBoolean(6);
 
+            var state = new StreamState
+            {
+                Version = version,
+                LastTimestamp = lastTimestamp,
+                Created = created,
+                IsArchived = isArchived
+            };
+
             if (_events.StreamIdentity == StreamIdentity.AsGuid)
             {
-                return new StreamState(reader.GetGuid(0), version, null, lastTimestamp, created)
-                {
-                    IsArchived = isArchived
-                };
+                state.Id = reader.GetGuid(0);
             }
             else
             {
-                return new StreamState(reader.GetString(0), version, null, lastTimestamp, created)
-                {
-                    IsArchived = isArchived
-                };
+                state.Key = reader.GetString(0);
             }
+
+            return state;
         }
 
         return null;
@@ -238,10 +241,7 @@ internal class QueryEventStore : IQueryEventStore
     private async Task<(T? snapshot, long version)> TryLoadSnapshotAsync<T>(object streamId,
         CancellationToken token) where T : class
     {
-        var conn = await _session.GetConnectionAsync(token);
-        await using var cmd = conn.CreateCommand();
-        if (_session.ActiveTransaction != null) cmd.Transaction = _session.ActiveTransaction;
-
+        await using var cmd = new SqlCommand();
         cmd.CommandText = $"""
             SELECT snapshot, snapshot_version
             FROM {_events.StreamsTableName}
@@ -250,7 +250,7 @@ internal class QueryEventStore : IQueryEventStore
         cmd.Parameters.AddWithValue("@id", streamId);
         cmd.Parameters.AddWithValue("@tenant_id", _session.TenantId);
 
-        await using var reader = await cmd.ExecuteReaderAsync(token);
+        await using var reader = await _session.ExecuteReaderAsync(cmd, token);
         if (await reader.ReadAsync(token))
         {
             var json = reader.GetString(0);

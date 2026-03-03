@@ -1,4 +1,5 @@
 using Microsoft.Data.SqlClient;
+using Polly;
 using Polecat.Exceptions;
 using Polecat.Internal;
 
@@ -9,11 +10,12 @@ internal class HiloSequence : ISequence
     private readonly ConnectionFactory _connectionFactory;
     private readonly string _schemaName;
     private readonly HiloSettings _settings;
+    private readonly ResiliencePipeline _resilience;
     private readonly object _lock = new();
     private bool _tableEnsured;
 
     public HiloSequence(ConnectionFactory connectionFactory, string schemaName, string entityName,
-        HiloSettings settings)
+        HiloSettings settings, ResiliencePipeline resilience)
     {
         _connectionFactory = connectionFactory;
         _schemaName = schemaName;
@@ -22,6 +24,7 @@ internal class HiloSequence : ISequence
         CurrentLo = 1;
         MaxLo = settings.MaxLo;
         _settings = settings;
+        _resilience = resilience;
     }
 
     public string EntityName { get; }
@@ -54,15 +57,18 @@ internal class HiloSequence : ISequence
         // Guarantee the hilo row exists
         await AdvanceToNextHi();
 
-        await using var conn = _connectionFactory.Create();
-        await conn.OpenAsync();
+        await _resilience.ExecuteAsync(async (state, ct) =>
+        {
+            await using var conn = _connectionFactory.Create();
+            await conn.OpenAsync(ct);
 
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText =
-            $"UPDATE [{_schemaName}].[pc_hilo] SET hi_value = @floor WHERE entity_name = @name;";
-        cmd.Parameters.AddWithValue("@floor", numberOfPages);
-        cmd.Parameters.AddWithValue("@name", EntityName);
-        await cmd.ExecuteNonQueryAsync();
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText =
+                $"UPDATE [{_schemaName}].[pc_hilo] SET hi_value = @floor WHERE entity_name = @name;";
+            cmd.Parameters.AddWithValue("@floor", state);
+            cmd.Parameters.AddWithValue("@name", EntityName);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }, numberOfPages);
 
         // Advance again to pick up the new floor
         await AdvanceToNextHi();
@@ -70,21 +76,24 @@ internal class HiloSequence : ISequence
 
     public async Task AdvanceToNextHi(CancellationToken ct = default)
     {
-        await using var conn = _connectionFactory.Create();
-        await conn.OpenAsync(ct);
-
-        await EnsureHiloTableAsync(conn, ct);
-
-        for (var attempts = 0; attempts < _settings.MaxAdvanceToNextHiAttempts; attempts++)
+        await _resilience.ExecuteAsync(async (_, cancellation) =>
         {
-            var result = await TryGetNextHiAsync(conn, ct);
-            if (TrySetCurrentHi(result))
-            {
-                return;
-            }
-        }
+            await using var conn = _connectionFactory.Create();
+            await conn.OpenAsync(cancellation);
 
-        throw new HiloSequenceAdvanceToNextHiAttemptsExceededException();
+            await EnsureHiloTableAsync(conn, cancellation);
+
+            for (var attempts = 0; attempts < _settings.MaxAdvanceToNextHiAttempts; attempts++)
+            {
+                var result = await TryGetNextHiAsync(conn, cancellation);
+                if (TrySetCurrentHi(result))
+                {
+                    return;
+                }
+            }
+
+            throw new HiloSequenceAdvanceToNextHiAttemptsExceededException();
+        }, ct);
     }
 
     private void AdvanceToNextHiSync()

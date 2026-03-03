@@ -120,7 +120,8 @@ public class high_water_detector_tests : IntegrationContext
             theStore.Database.Events,
             theStore.Options.ConnectionString,
             theStore.Options.DaemonSettings,
-            NullLogger<PolecatHighWaterDetector>.Instance);
+            NullLogger<PolecatHighWaterDetector>.Instance,
+            theStore.Options.ResiliencePipeline);
     }
 
     private async Task<List<long>> InsertContiguousEventsAsync(int count)

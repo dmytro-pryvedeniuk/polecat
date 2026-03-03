@@ -7,6 +7,7 @@ using Microsoft.Data.SqlClient;
 using Polecat.Events;
 using Polecat.Exceptions;
 using Polecat.Internal.Operations;
+using Polecat.Internal.Sessions;
 using Polecat.Linq.Members;
 using Polecat.Linq.Parsing;
 using Polecat.Metadata;
@@ -17,32 +18,29 @@ namespace Polecat.Internal;
 
 /// <summary>
 ///     Base class for document sessions. Handles operation queueing, event stream
-///     processing, and SaveChangesAsync.
+///     processing, and SaveChangesAsync. Uses IAlwaysConnectedLifetime for
+///     persistent connection + transaction management.
 /// </summary>
 internal abstract class DocumentSessionBase : QuerySession, IDocumentSession
 {
     private readonly WorkTracker _workTracker = new();
     private readonly IInlineProjection<IDocumentSession>[] _inlineProjections;
     private readonly IReadOnlyList<IDocumentSessionListener> _sessionListeners;
+    private readonly IAlwaysConnectedLifetime _transactional;
     private EventOperations? _eventOperations;
-
-    /// <summary>
-    ///     The active transaction during SaveChangesAsync. Set so that projection storage
-    ///     commands can be enlisted in the same transaction.
-    /// </summary>
-    internal override SqlTransaction? ActiveTransaction { get; set; }
 
     protected DocumentSessionBase(
         StoreOptions options,
-        ConnectionFactory connectionFactory,
+        IAlwaysConnectedLifetime lifetime,
         DocumentProviderRegistry providers,
         DocumentTableEnsurer tableEnsurer,
         EventGraph eventGraph,
         IInlineProjection<IDocumentSession>[] inlineProjections,
         string tenantId,
         IReadOnlyList<IDocumentSessionListener>? sessionListeners = null)
-        : base(options, connectionFactory, providers, tableEnsurer, eventGraph, tenantId)
+        : base(options, lifetime, providers, tableEnsurer, eventGraph, tenantId)
     {
+        _transactional = lifetime;
         _inlineProjections = inlineProjections;
         _sessionListeners = sessionListeners ?? Array.Empty<IDocumentSessionListener>();
     }
@@ -59,11 +57,15 @@ internal abstract class DocumentSessionBase : QuerySession, IDocumentSession
 
     internal EventGraph EventGraph => _eventGraph;
 
+    /// <summary>
+    ///     Access the transactional connection's active transaction (if any).
+    /// </summary>
+    internal SqlTransaction? ActiveTransaction => _transactional.Transaction;
+
     internal async Task BeginTransactionAsync(CancellationToken token)
     {
-        if (ActiveTransaction != null) return;
-        var conn = await GetConnectionAsync(token);
-        ActiveTransaction = (SqlTransaction)await conn.BeginTransactionAsync(token);
+        if (_transactional.Transaction != null) return;
+        await _transactional.BeginTransactionAsync(token);
     }
 
     internal async Task EnsureTableForProviderAsync(DocumentProvider provider, CancellationToken token)
@@ -263,36 +265,26 @@ internal abstract class DocumentSessionBase : QuerySession, IDocumentSession
             await _tableEnsurer.EnsureTablesAsync(typesNeeded, token);
         }
 
-        var conn = await GetConnectionAsync(token);
-        var existingTx = ActiveTransaction;
-        SqlTransaction tx;
-        bool createdTx;
+        bool createdTx = _transactional.Transaction == null;
+        if (createdTx)
+        {
+            await _transactional.BeginTransactionAsync(token);
+        }
 
-        if (existingTx != null)
-        {
-            tx = existingTx;
-            createdTx = false;
-        }
-        else
-        {
-            tx = (SqlTransaction)await conn.BeginTransactionAsync(token);
-            createdTx = true;
-        }
+        var tx = _transactional.Transaction!;
 
         try
         {
-            ActiveTransaction = tx;
-
             // Process event streams first
             foreach (var stream in _workTracker.Streams)
             {
                 if (stream.ActionType == StreamActionType.Start)
                 {
-                    await ProcessStartStreamAsync(stream, conn, tx, token);
+                    await ProcessStartStreamAsync(stream, token);
                 }
                 else
                 {
-                    await ProcessAppendStreamAsync(stream, conn, tx, token);
+                    await ProcessAppendStreamAsync(stream, token);
                 }
             }
 
@@ -328,8 +320,7 @@ internal abstract class DocumentSessionBase : QuerySession, IDocumentSession
             // Process document operations using BatchBuilder/SqlBatch
             if (_workTracker.Operations.Count > 0)
             {
-                await using var batch = new SqlBatch(conn);
-                batch.Transaction = tx;
+                await using var batch = new SqlBatch();
                 var builder = new BatchBuilder(batch);
 
                 var operations = _workTracker.Operations;
@@ -341,17 +332,29 @@ internal abstract class DocumentSessionBase : QuerySession, IDocumentSession
 
                 builder.Compile();
 
-                await using var reader = await batch.ExecuteReaderAsync(token);
-                for (var i = 0; i < operations.Count; i++)
+                try
                 {
-                    await operations[i].PostprocessAsync(reader, token);
-                    if (i < operations.Count - 1)
+                    await using var reader = await ExecuteReaderAsync(batch, token);
+                    for (var i = 0; i < operations.Count; i++)
                     {
-                        await reader.NextResultAsync(token);
+                        await operations[i].PostprocessAsync(reader, token);
+                        if (i < operations.Count - 1)
+                        {
+                            await reader.NextResultAsync(token);
+                        }
                     }
                 }
+                catch (SqlException ex) when (ex.Number == 2627)
+                {
+                    // Map duplicate key violation to DocumentAlreadyExistsException
+                    var insertOp = operations.FirstOrDefault(op => op.Role == OperationRole.Insert);
+                    if (insertOp != null)
+                    {
+                        throw new DocumentAlreadyExistsException(insertOp.DocumentType, insertOp.DocumentId!);
+                    }
 
-                RequestCount++;
+                    throw;
+                }
             }
 
             await tx.CommitAsync(token);
@@ -377,13 +380,15 @@ internal abstract class DocumentSessionBase : QuerySession, IDocumentSession
         }
         finally
         {
-            ActiveTransaction = null;
-            if (createdTx) await tx.DisposeAsync();
+            if (createdTx)
+            {
+                await tx.DisposeAsync();
+                _transactional.Transaction = null;
+            }
         }
     }
 
-    private async Task ProcessStartStreamAsync(StreamAction stream, SqlConnection conn,
-        SqlTransaction tx, CancellationToken token)
+    private async Task ProcessStartStreamAsync(StreamAction stream, CancellationToken token)
     {
         var events = stream.Events;
 
@@ -399,9 +404,8 @@ internal abstract class DocumentSessionBase : QuerySession, IDocumentSession
         stream.Version = events.Count;
 
         // INSERT stream row
-        await using (var cmd = conn.CreateCommand())
         {
-            cmd.Transaction = tx;
+            await using var cmd = new SqlCommand();
             var streamId = _eventGraph.StreamIdentity == JasperFx.Events.StreamIdentity.AsGuid
                 ? (object)stream.Id
                 : stream.Key!;
@@ -419,7 +423,7 @@ internal abstract class DocumentSessionBase : QuerySession, IDocumentSession
 
             try
             {
-                await cmd.ExecuteNonQueryAsync(token);
+                await ExecuteAsync(cmd, token);
             }
             catch (SqlException ex) when (ex.Number == 2627)
             {
@@ -433,12 +437,11 @@ internal abstract class DocumentSessionBase : QuerySession, IDocumentSession
         // INSERT each event
         foreach (var @event in events)
         {
-            await InsertEventAsync(@event, stream, conn, tx, token);
+            await InsertEventAsync(@event, stream, token);
         }
     }
 
-    private async Task ProcessAppendStreamAsync(StreamAction stream, SqlConnection conn,
-        SqlTransaction tx, CancellationToken token)
+    private async Task ProcessAppendStreamAsync(StreamAction stream, CancellationToken token)
     {
         var streamId = _eventGraph.StreamIdentity == JasperFx.Events.StreamIdentity.AsGuid
             ? (object)stream.Id
@@ -449,14 +452,13 @@ internal abstract class DocumentSessionBase : QuerySession, IDocumentSession
         bool streamExists = false;
         bool isArchived = false;
 
-        await using (var cmd = conn.CreateCommand())
         {
-            cmd.Transaction = tx;
+            await using var cmd = new SqlCommand();
             cmd.CommandText =
                 $"SELECT version, is_archived FROM {_eventGraph.StreamsTableName} WITH (UPDLOCK, HOLDLOCK) WHERE id = @id AND tenant_id = @tenant_id;";
             cmd.Parameters.AddWithValue("@id", streamId);
             cmd.Parameters.AddWithValue("@tenant_id", TenantId);
-            await using var reader = await cmd.ExecuteReaderAsync(token);
+            await using var reader = await ExecuteReaderAsync(cmd, token);
             if (await reader.ReadAsync(token))
             {
                 currentVersion = reader.GetInt64(0);
@@ -494,19 +496,17 @@ internal abstract class DocumentSessionBase : QuerySession, IDocumentSession
         // Step 3: Upsert stream row
         if (streamExists)
         {
-            await using var cmd = conn.CreateCommand();
-            cmd.Transaction = tx;
+            await using var cmd = new SqlCommand();
             cmd.CommandText =
                 $"UPDATE {_eventGraph.StreamsTableName} SET version = @version, timestamp = SYSDATETIMEOFFSET() WHERE id = @id AND tenant_id = @tenant_id;";
             cmd.Parameters.AddWithValue("@id", streamId);
             cmd.Parameters.AddWithValue("@version", newVersion);
             cmd.Parameters.AddWithValue("@tenant_id", TenantId);
-            await cmd.ExecuteNonQueryAsync(token);
+            await ExecuteAsync(cmd, token);
         }
         else
         {
-            await using var cmd = conn.CreateCommand();
-            cmd.Transaction = tx;
+            await using var cmd = new SqlCommand();
             cmd.CommandText = $"""
                 INSERT INTO {_eventGraph.StreamsTableName}
                     (id, type, version, timestamp, created, tenant_id)
@@ -517,25 +517,23 @@ internal abstract class DocumentSessionBase : QuerySession, IDocumentSession
                 (object?)stream.AggregateType?.Name ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@version", newVersion);
             cmd.Parameters.AddWithValue("@tenant_id", stream.TenantId);
-            await cmd.ExecuteNonQueryAsync(token);
+            await ExecuteAsync(cmd, token);
         }
 
         // Step 4: Insert events
         foreach (var @event in events)
         {
-            await InsertEventAsync(@event, stream, conn, tx, token);
+            await InsertEventAsync(@event, stream, token);
         }
     }
 
-    private async Task InsertEventAsync(IEvent @event, StreamAction stream,
-        SqlConnection conn, SqlTransaction tx, CancellationToken token)
+    private async Task InsertEventAsync(IEvent @event, StreamAction stream, CancellationToken token)
     {
         var streamId = _eventGraph.StreamIdentity == JasperFx.Events.StreamIdentity.AsGuid
             ? (object)stream.Id
             : stream.Key!;
 
-        await using var cmd = conn.CreateCommand();
-        cmd.Transaction = tx;
+        await using var cmd = new SqlCommand();
         cmd.CommandText = $"""
             INSERT INTO {_eventGraph.EventsTableName}
                 (id, stream_id, version, data, type, timestamp, tenant_id, dotnet_type)
@@ -550,7 +548,7 @@ internal abstract class DocumentSessionBase : QuerySession, IDocumentSession
         cmd.Parameters.AddWithValue("@tenant_id", @event.TenantId ?? TenantId);
         cmd.Parameters.AddWithValue("@dotnet_type", @event.DotNetTypeName);
 
-        var seqId = (long)(await cmd.ExecuteScalarAsync(token))!;
+        var seqId = (long)(await ExecuteScalarAsync(cmd, token))!;
         @event.Sequence = seqId;
     }
 

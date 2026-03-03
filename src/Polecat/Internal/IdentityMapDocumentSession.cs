@@ -1,5 +1,6 @@
 using JasperFx.Events.Projections;
 using Polecat.Events;
+using Polecat.Internal.Sessions;
 
 namespace Polecat.Internal;
 
@@ -13,14 +14,14 @@ internal class IdentityMapDocumentSession : DocumentSessionBase
 
     public IdentityMapDocumentSession(
         StoreOptions options,
-        ConnectionFactory connectionFactory,
+        IAlwaysConnectedLifetime lifetime,
         DocumentProviderRegistry providers,
         DocumentTableEnsurer tableEnsurer,
         EventGraph eventGraph,
         IInlineProjection<IDocumentSession>[] inlineProjections,
         string tenantId,
         IReadOnlyList<IDocumentSessionListener>? sessionListeners = null)
-        : base(options, connectionFactory, providers, tableEnsurer, eventGraph, inlineProjections, tenantId, sessionListeners)
+        : base(options, lifetime, providers, tableEnsurer, eventGraph, inlineProjections, tenantId, sessionListeners)
     {
     }
 

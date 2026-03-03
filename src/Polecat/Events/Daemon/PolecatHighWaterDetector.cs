@@ -2,6 +2,7 @@ using JasperFx.Events.Daemon;
 using JasperFx.Events.Daemon.HighWater;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
+using Polly;
 
 namespace Polecat.Events.Daemon;
 
@@ -9,6 +10,7 @@ namespace Polecat.Events.Daemon;
 ///     SQL Server implementation of IHighWaterDetector.
 ///     Detects the highest contiguous seq_id in pc_events and manages
 ///     the high water mark in pc_event_progression.
+///     All SQL execution is wrapped with Polly resilience.
 /// </summary>
 internal class PolecatHighWaterDetector : IHighWaterDetector
 {
@@ -16,14 +18,17 @@ internal class PolecatHighWaterDetector : IHighWaterDetector
     private readonly string _connectionString;
     private readonly DaemonSettings _daemonSettings;
     private readonly ILogger<PolecatHighWaterDetector> _logger;
+    private readonly ResiliencePipeline _resilience;
 
     public PolecatHighWaterDetector(EventGraph events, string connectionString,
-        DaemonSettings daemonSettings, ILogger<PolecatHighWaterDetector> logger)
+        DaemonSettings daemonSettings, ILogger<PolecatHighWaterDetector> logger,
+        ResiliencePipeline resilience)
     {
         _events = events;
         _connectionString = connectionString;
         _daemonSettings = daemonSettings;
         _logger = logger;
+        _resilience = resilience;
 
         var builder = new SqlConnectionStringBuilder(connectionString);
         var server = builder.DataSource ?? "localhost";
@@ -118,102 +123,111 @@ internal class PolecatHighWaterDetector : IHighWaterDetector
 
     internal async Task<HighWaterStatistics> LoadStatisticsAsync(CancellationToken token)
     {
-        await using var conn = new SqlConnection(_connectionString);
-        await conn.OpenAsync(token);
-
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"""
-            SELECT ISNULL(MAX(seq_id), 0) FROM {_events.EventsTableName};
-            SELECT last_seq_id, last_updated FROM {_events.ProgressionTableName}
-                WHERE name = 'HighWaterMark';
-            """;
-
-        var stats = new HighWaterStatistics();
-
-        await using var reader = await cmd.ExecuteReaderAsync(token);
-
-        // First result: highest sequence
-        if (await reader.ReadAsync(token))
+        return await _resilience.ExecuteAsync(async (_, ct) =>
         {
-            stats.HighestSequence = reader.GetInt64(0);
-        }
+            await using var conn = new SqlConnection(_connectionString);
+            await conn.OpenAsync(ct);
 
-        // Second result: current mark from progression
-        if (await reader.NextResultAsync(token) && await reader.ReadAsync(token))
-        {
-            stats.LastMark = reader.GetInt64(0);
-            stats.CurrentMark = stats.LastMark;
-            stats.SafeStartMark = stats.LastMark;
-            stats.LastUpdated = reader.GetDateTimeOffset(1);
-        }
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"""
+                SELECT ISNULL(MAX(seq_id), 0) FROM {_events.EventsTableName};
+                SELECT last_seq_id, last_updated FROM {_events.ProgressionTableName}
+                    WHERE name = 'HighWaterMark';
+                """;
 
-        stats.Timestamp = DateTimeOffset.UtcNow;
+            var stats = new HighWaterStatistics();
 
-        return stats;
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+
+            // First result: highest sequence
+            if (await reader.ReadAsync(ct))
+            {
+                stats.HighestSequence = reader.GetInt64(0);
+            }
+
+            // Second result: current mark from progression
+            if (await reader.NextResultAsync(ct) && await reader.ReadAsync(ct))
+            {
+                stats.LastMark = reader.GetInt64(0);
+                stats.CurrentMark = stats.LastMark;
+                stats.SafeStartMark = stats.LastMark;
+                stats.LastUpdated = reader.GetDateTimeOffset(1);
+            }
+
+            stats.Timestamp = DateTimeOffset.UtcNow;
+
+            return stats;
+        }, token);
     }
 
     internal async Task<(long? GapSeqId, long? MinSeqId, long? MaxSeqId)> DetectGapAsync(long start,
         CancellationToken token)
     {
-        await using var conn = new SqlConnection(_connectionString);
-        await conn.OpenAsync(token);
-
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"""
-            SELECT TOP 1 seq_id FROM (
-                SELECT seq_id, LEAD(seq_id) OVER (ORDER BY seq_id) AS next_seq
-                FROM {_events.EventsTableName} WHERE seq_id >= @start
-            ) ct WHERE next_seq IS NOT NULL AND next_seq - seq_id > 1;
-
-            SELECT MIN(seq_id) FROM {_events.EventsTableName} WHERE seq_id >= @start;
-
-            SELECT MAX(seq_id) FROM {_events.EventsTableName} WHERE seq_id >= @start;
-            """;
-
-        cmd.Parameters.AddWithValue("@start", start);
-
-        long? gapSeqId = null;
-        long? minSeqId = null;
-        long? maxSeqId = null;
-
-        await using var reader = await cmd.ExecuteReaderAsync(token);
-
-        // First result: gap detection between consecutive events
-        if (await reader.ReadAsync(token) && !reader.IsDBNull(0))
+        return await _resilience.ExecuteAsync(async (state, ct) =>
         {
-            gapSeqId = reader.GetInt64(0);
-        }
+            await using var conn = new SqlConnection(_connectionString);
+            await conn.OpenAsync(ct);
 
-        // Second result: min seq_id in range
-        if (await reader.NextResultAsync(token) && await reader.ReadAsync(token) && !reader.IsDBNull(0))
-        {
-            minSeqId = reader.GetInt64(0);
-        }
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"""
+                SELECT TOP 1 seq_id FROM (
+                    SELECT seq_id, LEAD(seq_id) OVER (ORDER BY seq_id) AS next_seq
+                    FROM {_events.EventsTableName} WHERE seq_id >= @start
+                ) ct WHERE next_seq IS NOT NULL AND next_seq - seq_id > 1;
 
-        // Third result: max seq_id in range
-        if (await reader.NextResultAsync(token) && await reader.ReadAsync(token) && !reader.IsDBNull(0))
-        {
-            maxSeqId = reader.GetInt64(0);
-        }
+                SELECT MIN(seq_id) FROM {_events.EventsTableName} WHERE seq_id >= @start;
 
-        return (gapSeqId, minSeqId, maxSeqId);
+                SELECT MAX(seq_id) FROM {_events.EventsTableName} WHERE seq_id >= @start;
+                """;
+
+            cmd.Parameters.AddWithValue("@start", state);
+
+            long? gapSeqId = null;
+            long? minSeqId = null;
+            long? maxSeqId = null;
+
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+
+            // First result: gap detection between consecutive events
+            if (await reader.ReadAsync(ct) && !reader.IsDBNull(0))
+            {
+                gapSeqId = reader.GetInt64(0);
+            }
+
+            // Second result: min seq_id in range
+            if (await reader.NextResultAsync(ct) && await reader.ReadAsync(ct) && !reader.IsDBNull(0))
+            {
+                minSeqId = reader.GetInt64(0);
+            }
+
+            // Third result: max seq_id in range
+            if (await reader.NextResultAsync(ct) && await reader.ReadAsync(ct) && !reader.IsDBNull(0))
+            {
+                maxSeqId = reader.GetInt64(0);
+            }
+
+            return (gapSeqId, minSeqId, maxSeqId);
+        }, start, token);
     }
 
     internal async Task MarkHighWaterAsync(long mark, CancellationToken token)
     {
-        await using var conn = new SqlConnection(_connectionString);
-        await conn.OpenAsync(token);
+        await _resilience.ExecuteAsync(async (state, ct) =>
+        {
+            await using var conn = new SqlConnection(_connectionString);
+            await conn.OpenAsync(ct);
 
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"""
-            MERGE {_events.ProgressionTableName} AS target
-            USING (SELECT 'HighWaterMark' AS name) AS source ON target.name = source.name
-            WHEN MATCHED THEN UPDATE SET last_seq_id = @mark, last_updated = SYSDATETIMEOFFSET()
-            WHEN NOT MATCHED THEN INSERT (name, last_seq_id, last_updated)
-                VALUES ('HighWaterMark', @mark, SYSDATETIMEOFFSET());
-            """;
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"""
+                MERGE {_events.ProgressionTableName} AS target
+                USING (SELECT 'HighWaterMark' AS name) AS source ON target.name = source.name
+                WHEN MATCHED THEN UPDATE SET last_seq_id = @mark, last_updated = SYSDATETIMEOFFSET()
+                WHEN NOT MATCHED THEN INSERT (name, last_seq_id, last_updated)
+                    VALUES ('HighWaterMark', @mark, SYSDATETIMEOFFSET());
+                """;
 
-        cmd.Parameters.AddWithValue("@mark", mark);
-        await cmd.ExecuteNonQueryAsync(token);
+            cmd.Parameters.AddWithValue("@mark", state);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }, mark, token);
     }
 }

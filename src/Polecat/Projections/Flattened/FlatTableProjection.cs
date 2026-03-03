@@ -232,11 +232,7 @@ public abstract class FlatTableProjection : ProjectionBase,
 
     private async Task EnsureTableAsync(DocumentSessionBase session, CancellationToken cancellation)
     {
-        var conn = await session.GetConnectionAsync(cancellation);
-
-        await using var cmd = conn.CreateCommand();
-        if (session.ActiveTransaction != null) cmd.Transaction = session.ActiveTransaction;
-
+        await using var cmd = new Microsoft.Data.SqlClient.SqlCommand();
         cmd.CommandText = $"""
             IF NOT EXISTS (SELECT * FROM sys.tables t
                 JOIN sys.schemas s ON t.schema_id = s.schema_id
@@ -246,7 +242,7 @@ public abstract class FlatTableProjection : ProjectionBase,
             END
             """;
 
-        await cmd.ExecuteNonQueryAsync(cancellation);
+        await session.ExecuteAsync(cmd, cancellation);
     }
 
     private string GenerateCreateTableDdl()

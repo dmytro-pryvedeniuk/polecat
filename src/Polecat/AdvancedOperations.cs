@@ -1,5 +1,6 @@
 using System.Text;
 using Microsoft.Data.SqlClient;
+using Polly;
 using Polecat.Internal;
 using Polecat.Metadata;
 using Polecat.Schema.Identity.Sequences;
@@ -10,10 +11,12 @@ namespace Polecat;
 public class AdvancedOperations
 {
     private readonly DocumentStore _store;
+    private readonly ResiliencePipeline _resilience;
 
     internal AdvancedOperations(DocumentStore store)
     {
         _store = store;
+        _resilience = store.Options.ResiliencePipeline;
     }
 
     public HiloSettings HiloSequenceDefaults => _store.Options.HiloSequenceDefaults;
@@ -87,18 +90,21 @@ public class AdvancedOperations
             rows.Add((id, json, mapping.DotNetTypeName));
         }
 
-        // Execute in batches
+        // Execute in batches with Polly wrapping
         var connFactory = _store.Options.Tenancy!.GetConnectionFactory(tenantId);
-        await using var conn = connFactory.Create();
-        await conn.OpenAsync(token);
-
-        for (var offset = 0; offset < rows.Count; offset += batchSize)
+        await _resilience.ExecuteAsync(async (_, ct) =>
         {
-            var batch = rows.Skip(offset).Take(batchSize).ToList();
-            await using var cmd = conn.CreateCommand();
-            BuildBatchCommand(cmd, batch, mapping, tenantId, mode);
-            await cmd.ExecuteNonQueryAsync(token);
-        }
+            await using var conn = connFactory.Create();
+            await conn.OpenAsync(ct);
+
+            for (var offset = 0; offset < rows.Count; offset += batchSize)
+            {
+                var batch = rows.Skip(offset).Take(batchSize).ToList();
+                await using var cmd = conn.CreateCommand();
+                BuildBatchCommand(cmd, batch, mapping, tenantId, mode);
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+        }, token);
     }
 
     private static void BuildBatchCommand(
@@ -211,33 +217,36 @@ public class AdvancedOperations
     public async Task CleanAllDocumentsAsync(CancellationToken token = default)
     {
         var schema = _store.Options.DatabaseSchemaName;
-        await using var conn = new SqlConnection(_store.Options.ConnectionString);
-        await conn.OpenAsync(token);
-
-        // Find all pc_doc_* tables in the schema
-        await using var findCmd = conn.CreateCommand();
-        findCmd.CommandText = $"""
-            SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
-            WHERE TABLE_SCHEMA = @schema AND TABLE_NAME LIKE 'pc_doc_%'
-            ORDER BY TABLE_NAME;
-            """;
-        findCmd.Parameters.AddWithValue("@schema", schema);
-
-        var tables = new List<string>();
-        await using (var reader = await findCmd.ExecuteReaderAsync(token))
+        await _resilience.ExecuteAsync(async (_, ct) =>
         {
-            while (await reader.ReadAsync(token))
+            await using var conn = new SqlConnection(_store.Options.ConnectionString);
+            await conn.OpenAsync(ct);
+
+            // Find all pc_doc_* tables in the schema
+            await using var findCmd = conn.CreateCommand();
+            findCmd.CommandText = $"""
+                SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_SCHEMA = @schema AND TABLE_NAME LIKE 'pc_doc_%'
+                ORDER BY TABLE_NAME;
+                """;
+            findCmd.Parameters.AddWithValue("@schema", schema);
+
+            var tables = new List<string>();
+            await using (var reader = await findCmd.ExecuteReaderAsync(ct))
             {
-                tables.Add(reader.GetString(0));
+                while (await reader.ReadAsync(ct))
+                {
+                    tables.Add(reader.GetString(0));
+                }
             }
-        }
 
-        foreach (var table in tables)
-        {
-            await using var deleteCmd = conn.CreateCommand();
-            deleteCmd.CommandText = $"DELETE FROM [{schema}].[{table}];";
-            await deleteCmd.ExecuteNonQueryAsync(token);
-        }
+            foreach (var table in tables)
+            {
+                await using var deleteCmd = conn.CreateCommand();
+                deleteCmd.CommandText = $"DELETE FROM [{schema}].[{table}];";
+                await deleteCmd.ExecuteNonQueryAsync(ct);
+            }
+        }, token);
     }
 
     /// <summary>
@@ -246,12 +255,16 @@ public class AdvancedOperations
     public async Task CleanAsync<T>(CancellationToken token = default)
     {
         var provider = _store.GetProvider(typeof(T));
-        await using var conn = new SqlConnection(_store.Options.ConnectionString);
-        await conn.OpenAsync(token);
+        var tableName = provider.Mapping.QualifiedTableName;
+        await _resilience.ExecuteAsync(async (_, ct) =>
+        {
+            await using var conn = new SqlConnection(_store.Options.ConnectionString);
+            await conn.OpenAsync(ct);
 
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"DELETE FROM {provider.Mapping.QualifiedTableName};";
-        await cmd.ExecuteNonQueryAsync(token);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"IF OBJECT_ID('{tableName}', 'U') IS NOT NULL DELETE FROM {tableName};";
+            await cmd.ExecuteNonQueryAsync(ct);
+        }, token);
     }
 
     /// <summary>
@@ -302,26 +315,29 @@ public class AdvancedOperations
     public async Task CleanAllEventDataAsync(CancellationToken token = default)
     {
         var events = _store.Events;
-        await using var conn = new SqlConnection(_store.Options.ConnectionString);
-        await conn.OpenAsync(token);
-
-        // Delete in FK-safe order: events first, then streams, then progression
-        await using (var cmd = conn.CreateCommand())
+        await _resilience.ExecuteAsync(async (_, ct) =>
         {
-            cmd.CommandText = $"DELETE FROM {events.EventsTableName};";
-            await cmd.ExecuteNonQueryAsync(token);
-        }
+            await using var conn = new SqlConnection(_store.Options.ConnectionString);
+            await conn.OpenAsync(ct);
 
-        await using (var cmd = conn.CreateCommand())
-        {
-            cmd.CommandText = $"DELETE FROM {events.StreamsTableName};";
-            await cmd.ExecuteNonQueryAsync(token);
-        }
+            // Delete in FK-safe order: events first, then streams, then progression
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = $"DELETE FROM {events.EventsTableName};";
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
 
-        await using (var cmd = conn.CreateCommand())
-        {
-            cmd.CommandText = $"DELETE FROM {events.ProgressionTableName};";
-            await cmd.ExecuteNonQueryAsync(token);
-        }
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = $"DELETE FROM {events.StreamsTableName};";
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = $"DELETE FROM {events.ProgressionTableName};";
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+        }, token);
     }
 }
