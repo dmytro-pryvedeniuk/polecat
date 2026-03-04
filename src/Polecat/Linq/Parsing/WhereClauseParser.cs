@@ -69,11 +69,17 @@ internal class WhereClauseParser
             return ParseComparison(binary, op);
         }
 
-        throw new NotSupportedException($"Unsupported binary operator: {binary.NodeType}");
+        throw new NotSupportedException($"Unsupported binary operator: {binary.NodeType} in expression: {binary}");
     }
 
     private ISqlFragment ParseComparison(BinaryExpression binary, string op)
     {
+        // Handle modulo: x.Number % 2 == 0 → (member % divisor) op value
+        if (TryParseModulo(binary, op, out var moduloFragment))
+        {
+            return moduloFragment!;
+        }
+
         // Try to resolve: left=member, right=value
         if (TryResolveMemberAndValue(binary.Left, binary.Right, out var member, out var value))
         {
@@ -90,6 +96,42 @@ internal class WhereClauseParser
 
         throw new NotSupportedException(
             $"Cannot resolve comparison: {binary}");
+    }
+
+    private bool TryParseModulo(BinaryExpression binary, string op, out ISqlFragment? fragment)
+    {
+        fragment = null;
+
+        // Pattern: (x.Number % divisor) op value
+        if (binary.Left is BinaryExpression { NodeType: ExpressionType.Modulo } modulo)
+        {
+            var unwrapped = StripConvert(modulo.Left);
+            if (unwrapped is MemberExpression me && IsDocumentMember(me))
+            {
+                var member = _memberFactory.ResolveMember(me);
+                var divisor = ExtractValue(modulo.Right);
+                var value = ExtractValue(binary.Right);
+                fragment = new WhereFragment($"({member.TypedLocator} % {divisor}) {op} {value}");
+                return true;
+            }
+        }
+
+        // Reversed pattern: value op (x.Number % divisor)
+        if (binary.Right is BinaryExpression { NodeType: ExpressionType.Modulo } moduloR)
+        {
+            var unwrapped = StripConvert(moduloR.Left);
+            if (unwrapped is MemberExpression me && IsDocumentMember(me))
+            {
+                var member = _memberFactory.ResolveMember(me);
+                var divisor = ExtractValue(moduloR.Right);
+                var value = ExtractValue(binary.Left);
+                var reversedOp = ReverseOperator(op);
+                fragment = new WhereFragment($"({member.TypedLocator} % {divisor}) {reversedOp} {value}");
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private ISqlFragment BuildComparisonFilter(IQueryableMember member, object? value, string op)
@@ -123,9 +165,19 @@ internal class WhereClauseParser
 
     private ISqlFragment ParseBooleanMember(MemberExpression memberExpr, bool expectedValue)
     {
-        var member = _memberFactory.ResolveMember(memberExpr);
-        var value = member.ConvertValue(expectedValue);
-        return new ComparisonFilter(member.TypedLocator, "=", value!);
+        // Handle Nullable<T>.HasValue → IS NULL / IS NOT NULL
+        if (memberExpr.Member.Name == "HasValue" && memberExpr.Expression is MemberExpression nullableExpr
+            && Nullable.GetUnderlyingType(nullableExpr.Type) != null)
+        {
+            var member = _memberFactory.ResolveMember(nullableExpr);
+            return expectedValue
+                ? new WhereFragment($"{member.RawLocator} IS NOT NULL")
+                : new WhereFragment($"{member.RawLocator} IS NULL");
+        }
+
+        var resolvedMember = _memberFactory.ResolveMember(memberExpr);
+        var value = resolvedMember.ConvertValue(expectedValue);
+        return new ComparisonFilter(resolvedMember.TypedLocator, "=", value!);
     }
 
     private bool TryResolveMemberAndValue(Expression memberExpr, Expression valueExpr,

@@ -1,6 +1,7 @@
 using System.Data.Common;
 using Polecat.Linq.SqlGeneration;
 using Polecat.Storage;
+using Weasel.Core;
 using Weasel.SqlServer;
 
 namespace Polecat.Internal.Operations;
@@ -19,7 +20,7 @@ internal class UndoDeleteWhereOperation : IStorageOperation
     }
 
     public Type DocumentType => _mapping.DocumentType;
-    public OperationRole Role => OperationRole.Update;
+    public OperationRole Role() => OperationRole.Update;
 
     public void ConfigureCommand(ICommandBuilder builder)
     {
@@ -31,5 +32,5 @@ internal class UndoDeleteWhereOperation : IStorageOperation
         builder.Append(";");
     }
 
-    public Task PostprocessAsync(DbDataReader reader, CancellationToken token) => Task.CompletedTask;
+    public Task PostprocessAsync(DbDataReader reader, IList<Exception> exceptions, CancellationToken token) => Task.CompletedTask;
 }

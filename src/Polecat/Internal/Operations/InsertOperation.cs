@@ -4,6 +4,7 @@ using Microsoft.Data.SqlClient;
 using Polecat.Exceptions;
 using Polecat.Metadata;
 using Polecat.Storage;
+using Weasel.Core;
 using Weasel.SqlServer;
 
 namespace Polecat.Internal.Operations;
@@ -28,7 +29,7 @@ internal class InsertOperation : IStorageOperation
     }
 
     public Type DocumentType => _mapping.DocumentType;
-    public OperationRole Role => OperationRole.Insert;
+    public OperationRole Role() => OperationRole.Insert;
     public object? DocumentId => _id;
     public object Document => _document;
 
@@ -64,7 +65,7 @@ internal class InsertOperation : IStorageOperation
         }
     }
 
-    public async Task PostprocessAsync(DbDataReader reader, CancellationToken token)
+    public async Task PostprocessAsync(DbDataReader reader, IList<Exception> exceptions, CancellationToken token)
     {
         if (await reader.ReadAsync(token))
         {

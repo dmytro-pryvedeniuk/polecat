@@ -1,5 +1,6 @@
 using System.Data.Common;
 using Polecat.Storage;
+using Weasel.Core;
 using Weasel.SqlServer;
 
 namespace Polecat.Internal.Operations;
@@ -18,7 +19,7 @@ internal class DeleteByIdOperation : IStorageOperation
     }
 
     public Type DocumentType => _mapping.DocumentType;
-    public OperationRole Role => OperationRole.Delete;
+    public OperationRole Role() => OperationRole.Deletion;
     public object? DocumentId => _id;
 
     public void ConfigureCommand(ICommandBuilder builder)
@@ -27,5 +28,5 @@ internal class DeleteByIdOperation : IStorageOperation
         builder.AddParameters(new Dictionary<string, object?> { ["id"] = _id, ["tenant_id"] = _tenantId });
     }
 
-    public Task PostprocessAsync(DbDataReader reader, CancellationToken token) => Task.CompletedTask;
+    public Task PostprocessAsync(DbDataReader reader, IList<Exception> exceptions, CancellationToken token) => Task.CompletedTask;
 }

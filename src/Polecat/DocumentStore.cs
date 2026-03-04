@@ -105,7 +105,8 @@ public partial class DocumentStore : IDocumentStore
     {
         var factory = ResolveConnectionFactory(options.TenantId);
         var ensurer = ReferenceEquals(factory, _connectionFactory) ? _tableEnsurer : new DocumentTableEnsurer(factory, Options);
-        var lifetime = new TransactionalConnection(factory, Options.CommandTimeout);
+        var timeout = options.Timeout ?? Options.CommandTimeout;
+        var lifetime = new TransactionalConnection(factory, timeout);
         return new LightweightSession(
             Options,
             lifetime,
@@ -126,7 +127,8 @@ public partial class DocumentStore : IDocumentStore
     {
         var factory = ResolveConnectionFactory(options.TenantId);
         var ensurer = ReferenceEquals(factory, _connectionFactory) ? _tableEnsurer : new DocumentTableEnsurer(factory, Options);
-        var lifetime = new TransactionalConnection(factory, Options.CommandTimeout);
+        var timeout = options.Timeout ?? Options.CommandTimeout;
+        var lifetime = new TransactionalConnection(factory, timeout);
         return new IdentityMapDocumentSession(
             Options,
             lifetime,
@@ -147,7 +149,8 @@ public partial class DocumentStore : IDocumentStore
     {
         var factory = ResolveConnectionFactory(options.TenantId);
         var ensurer = ReferenceEquals(factory, _connectionFactory) ? _tableEnsurer : new DocumentTableEnsurer(factory, Options);
-        var lifetime = new AutoClosingLifetime(factory, Options.CommandTimeout);
+        var timeout = options.Timeout ?? Options.CommandTimeout;
+        var lifetime = new AutoClosingLifetime(factory, timeout);
         return new Internal.QuerySession(
             Options,
             lifetime,
@@ -170,7 +173,8 @@ public partial class DocumentStore : IDocumentStore
     {
         var factory = ResolveConnectionFactory(options.TenantId);
         var ensurer = ReferenceEquals(factory, _connectionFactory) ? _tableEnsurer : new DocumentTableEnsurer(factory, Options);
-        var lifetime = new TransactionalConnection(factory, Options.CommandTimeout);
+        var timeout = options.Timeout ?? Options.CommandTimeout;
+        var lifetime = new TransactionalConnection(factory, timeout);
 
         if (options.IsolationLevel != System.Data.IsolationLevel.ReadCommitted)
         {

@@ -14,6 +14,11 @@ public class LinqTarget
     public long BigNumber { get; set; }
     public List<string> Tags { get; set; } = new();
     public int[] Numbers { get; set; } = [];
+
+    // Nullable properties for nullable type query tests
+    public int? NullableNumber { get; set; }
+    public bool? NullableBoolean { get; set; }
+    public DateTime? NullableDateTime { get; set; }
 }
 
 public enum TargetColor

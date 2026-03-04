@@ -86,6 +86,40 @@ public static class PolecatQueryableExtensions
     }
 
     /// <summary>
+    ///     Asynchronously returns the last element of a sequence.
+    /// </summary>
+    public static async Task<T> LastAsync<T>(
+        this IQueryable<T> queryable, CancellationToken token = default)
+    {
+        var provider = GetPolecatProvider(queryable);
+        var expression = BuildMethodCallExpression(queryable, nameof(Queryable.Last));
+        return (await provider.ExecuteAsync<T?>(expression, token))!;
+    }
+
+    /// <summary>
+    ///     Asynchronously returns the last element of a sequence, or a default value.
+    /// </summary>
+    public static async Task<T?> LastOrDefaultAsync<T>(
+        this IQueryable<T> queryable, CancellationToken token = default)
+    {
+        var provider = GetPolecatProvider(queryable);
+        var expression = BuildMethodCallExpression(queryable, nameof(Queryable.LastOrDefault));
+        return await provider.ExecuteAsync<T?>(expression, token);
+    }
+
+    /// <summary>
+    ///     Asynchronously returns the last element of a sequence that satisfies a condition.
+    /// </summary>
+    public static async Task<T> LastAsync<T>(
+        this IQueryable<T> queryable, Expression<Func<T, bool>> predicate,
+        CancellationToken token = default)
+    {
+        var provider = GetPolecatProvider(queryable);
+        var expression = BuildMethodCallExpression(queryable, nameof(Queryable.Last), predicate);
+        return (await provider.ExecuteAsync<T?>(expression, token))!;
+    }
+
+    /// <summary>
     ///     Asynchronously returns the number of elements in a sequence.
     /// </summary>
     public static async Task<int> CountAsync<T>(

@@ -1,5 +1,6 @@
 using System.Data.Common;
 using Polecat.Events;
+using Weasel.Core;
 using Weasel.SqlServer;
 
 namespace Polecat.Internal.Operations;
@@ -27,7 +28,7 @@ internal class UpdateSnapshotOperation : IStorageOperation
     }
 
     public Type DocumentType => typeof(object);
-    public OperationRole Role => OperationRole.Update;
+    public OperationRole Role() => OperationRole.Update;
 
     public void ConfigureCommand(ICommandBuilder builder)
     {
@@ -43,5 +44,5 @@ internal class UpdateSnapshotOperation : IStorageOperation
         });
     }
 
-    public Task PostprocessAsync(DbDataReader reader, CancellationToken token) => Task.CompletedTask;
+    public Task PostprocessAsync(DbDataReader reader, IList<Exception> exceptions, CancellationToken token) => Task.CompletedTask;
 }

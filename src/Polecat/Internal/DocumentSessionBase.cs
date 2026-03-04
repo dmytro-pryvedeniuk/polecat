@@ -12,6 +12,7 @@ using Polecat.Linq.Members;
 using Polecat.Linq.Parsing;
 using Polecat.Metadata;
 using Polecat.Projections;
+using Weasel.Core;
 using Weasel.SqlServer;
 
 namespace Polecat.Internal;
@@ -334,20 +335,26 @@ internal abstract class DocumentSessionBase : QuerySession, IDocumentSession
 
                 try
                 {
+                    var exceptions = new List<Exception>();
                     await using var reader = await ExecuteReaderAsync(batch, token);
                     for (var i = 0; i < operations.Count; i++)
                     {
-                        await operations[i].PostprocessAsync(reader, token);
+                        await operations[i].PostprocessAsync(reader, exceptions, token);
                         if (i < operations.Count - 1)
                         {
                             await reader.NextResultAsync(token);
                         }
                     }
+
+                    if (exceptions.Count > 0)
+                    {
+                        throw new AggregateException(exceptions);
+                    }
                 }
                 catch (SqlException ex) when (ex.Number == 2627)
                 {
                     // Map duplicate key violation to DocumentAlreadyExistsException
-                    var insertOp = operations.FirstOrDefault(op => op.Role == OperationRole.Insert);
+                    var insertOp = operations.FirstOrDefault(op => op.Role() == OperationRole.Insert);
                     if (insertOp != null)
                     {
                         throw new DocumentAlreadyExistsException(insertOp.DocumentType, insertOp.DocumentId!);
@@ -533,12 +540,42 @@ internal abstract class DocumentSessionBase : QuerySession, IDocumentSession
             ? (object)stream.Id
             : stream.Key!;
 
+        // Propagate session-level metadata to the event
+        if (CorrelationId != null && @event.CorrelationId == null)
+            @event.CorrelationId = CorrelationId;
+        if (CausationId != null && @event.CausationId == null)
+            @event.CausationId = CausationId;
+
+        var eventOptions = _eventGraph.EventOptions;
+
+        // Build column and value lists dynamically based on enabled metadata
+        var columns = "id, stream_id, version, data, type, timestamp, tenant_id, dotnet_type";
+        var values = "@id, @stream_id, @version, @data, @type, SYSDATETIMEOFFSET(), @tenant_id, @dotnet_type";
+
+        if (eventOptions.EnableCorrelationId)
+        {
+            columns += ", correlation_id";
+            values += ", @correlation_id";
+        }
+
+        if (eventOptions.EnableCausationId)
+        {
+            columns += ", causation_id";
+            values += ", @causation_id";
+        }
+
+        if (eventOptions.EnableHeaders)
+        {
+            columns += ", headers";
+            values += ", @headers";
+        }
+
         await using var cmd = new SqlCommand();
         cmd.CommandText = $"""
             INSERT INTO {_eventGraph.EventsTableName}
-                (id, stream_id, version, data, type, timestamp, tenant_id, dotnet_type)
+                ({columns})
             OUTPUT inserted.seq_id
-            VALUES (@id, @stream_id, @version, @data, @type, SYSDATETIMEOFFSET(), @tenant_id, @dotnet_type);
+            VALUES ({values});
             """;
         cmd.Parameters.AddWithValue("@id", @event.Id);
         cmd.Parameters.AddWithValue("@stream_id", streamId);
@@ -547,6 +584,27 @@ internal abstract class DocumentSessionBase : QuerySession, IDocumentSession
         cmd.Parameters.AddWithValue("@type", @event.EventTypeName);
         cmd.Parameters.AddWithValue("@tenant_id", @event.TenantId ?? TenantId);
         cmd.Parameters.AddWithValue("@dotnet_type", @event.DotNetTypeName);
+
+        if (eventOptions.EnableCorrelationId)
+        {
+            cmd.Parameters.AddWithValue("@correlation_id",
+                (object?)@event.CorrelationId ?? DBNull.Value);
+        }
+
+        if (eventOptions.EnableCausationId)
+        {
+            cmd.Parameters.AddWithValue("@causation_id",
+                (object?)@event.CausationId ?? DBNull.Value);
+        }
+
+        if (eventOptions.EnableHeaders)
+        {
+            var headersJson = @event.Headers != null && @event.Headers.Count > 0
+                ? Serializer.ToJson(@event.Headers)
+                : null;
+            cmd.Parameters.AddWithValue("@headers",
+                (object?)headersJson ?? DBNull.Value);
+        }
 
         var seqId = (long)(await ExecuteScalarAsync(cmd, token))!;
         @event.Sequence = seqId;

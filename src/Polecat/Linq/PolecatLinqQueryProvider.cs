@@ -3,12 +3,14 @@ using System.Linq.Expressions;
 using System.Text;
 using Microsoft.Data.SqlClient;
 using Polecat.Internal;
+using Polecat.Linq.Joins;
 using Polecat.Linq.Members;
 using Polecat.Linq.Parsing;
 using Polecat.Linq.QueryHandlers;
 using Polecat.Linq.Selectors;
 using Polecat.Linq.SqlGeneration;
 using Polecat.Metadata;
+using Polecat.Storage;
 using Weasel.SqlServer;
 
 namespace Polecat.Linq;
@@ -165,6 +167,12 @@ internal class PolecatLinqQueryProvider : IQueryProvider
         var parser = new LinqQueryParser(memberFactory, provider.Mapping.QualifiedTableName);
         parser.Parse(expression);
 
+        // Route to GroupJoin execution if detected
+        if (parser.GroupJoinData != null)
+        {
+            return await ExecuteGroupJoinAsync<TResult>(parser, token);
+        }
+
         // Wait for non-stale projection data if requested
         if (parser.NonStaleDataTimeout.HasValue)
         {
@@ -245,6 +253,432 @@ internal class PolecatLinqQueryProvider : IQueryProvider
         await using var reader = await _session.ExecuteReaderAsync(batch, token);
 
         return await HandleResultAsync<TResult>(reader, parser, documentType, token, syncRevision, syncGuidVersion);
+    }
+
+    private async Task<TResult> ExecuteGroupJoinAsync<TResult>(LinqQueryParser parser, CancellationToken token)
+    {
+        var joinData = parser.GroupJoinData!;
+
+        // Resolve providers for both sides
+        var outerProvider = _providers.GetProvider(joinData.OuterElementType);
+        var innerProvider = _providers.GetProvider(joinData.InnerElementType);
+        await _tableEnsurer.EnsureTableAsync(outerProvider, token);
+        await _tableEnsurer.EnsureTableAsync(innerProvider, token);
+
+        var outerMapping = outerProvider.Mapping;
+        var innerMapping = innerProvider.Mapping;
+
+        // Create MemberFactories for both sides
+        var outerMemberFactory = new MemberFactory(_session.Options, outerMapping);
+        var innerMemberFactory = new MemberFactory(_session.Options, innerMapping);
+
+        // Resolve key selectors to SQL locators
+        var outerKeyBody = LinqQueryParser.StripConvert(joinData.OuterKeySelector.Body);
+        var innerKeyBody = LinqQueryParser.StripConvert(joinData.InnerKeySelector.Body);
+
+        var outerKeyLocator = ResolveKeyLocator(outerKeyBody, outerMemberFactory);
+        var innerKeyLocator = ResolveKeyLocator(innerKeyBody, innerMemberFactory);
+
+        // Alias the locators for the join
+        outerKeyLocator = JoinStatement.AliasLocator(outerKeyLocator, "outer_t");
+        innerKeyLocator = JoinStatement.AliasLocator(innerKeyLocator, "inner_t");
+
+        // Build the JoinStatement
+        var joinStatement = new JoinStatement
+        {
+            OuterTable = outerMapping.QualifiedTableName,
+            InnerTable = innerMapping.QualifiedTableName,
+            OuterKeyLocator = outerKeyLocator,
+            InnerKeyLocator = innerKeyLocator,
+            IsLeftJoin = joinData.IsLeftJoin
+        };
+
+        // Add tenant filters for both sides
+        if (!parser.IsAnyTenant)
+        {
+            if (parser.TenantIds != null)
+            {
+                joinStatement.OuterWheres.Add(new TenantInFilter(parser.TenantIds, "outer_t.tenant_id"));
+                joinStatement.InnerWheres.Add(new TenantInFilter(parser.TenantIds, "inner_t.tenant_id"));
+            }
+            else
+            {
+                joinStatement.OuterWheres.Add(new ComparisonFilter("outer_t.tenant_id", "=", _session.TenantId));
+                joinStatement.InnerWheres.Add(new ComparisonFilter("inner_t.tenant_id", "=", _session.TenantId));
+            }
+        }
+
+        // Add soft delete filters for both sides
+        if (outerMapping.DeleteStyle == DeleteStyle.SoftDelete)
+        {
+            joinStatement.OuterWheres.Add(new LiteralSqlFragment("outer_t.is_deleted = 0"));
+        }
+        if (innerMapping.DeleteStyle == DeleteStyle.SoftDelete)
+        {
+            joinStatement.InnerWheres.Add(new LiteralSqlFragment("inner_t.is_deleted = 0"));
+        }
+
+        // Add any WHERE clauses from the outer source (captured by parser before GroupJoin).
+        // These use bare column names (data, id) — wrap them with aliasing for outer_t.
+        foreach (var where in parser.Statement.Wheres)
+        {
+            joinStatement.OuterWheres.Add(new AliasedSqlFragment(where, "outer_t"));
+        }
+
+        // Handle Count/First/Single terminal operators
+        if (parser.ValueMode != null)
+        {
+            switch (parser.ValueMode)
+            {
+                case SingleValueMode.Count:
+                    joinStatement.SelectColumns = "COUNT(*)";
+                    break;
+                case SingleValueMode.LongCount:
+                    joinStatement.SelectColumns = "CAST(COUNT(*) AS bigint)";
+                    break;
+                case SingleValueMode.First:
+                case SingleValueMode.FirstOrDefault:
+                    joinStatement.Limit = 1;
+                    break;
+                case SingleValueMode.Single:
+                case SingleValueMode.SingleOrDefault:
+                    joinStatement.Limit = 2;
+                    break;
+            }
+        }
+
+        // Transfer pagination from the parser's Statement
+        if (parser.Statement.Limit.HasValue && !joinStatement.Limit.HasValue)
+        {
+            joinStatement.Limit = parser.Statement.Limit;
+        }
+        if (parser.Statement.Offset.HasValue)
+        {
+            joinStatement.Offset = parser.Statement.Offset;
+        }
+
+        // Resolve OrderBy expressions captured after SelectMany.
+        // These reference the projected anonymous type — map each member to
+        // the correct table (outer or inner) via the result selector.
+        var memberOriginMap = BuildMemberOriginMap(joinData);
+        foreach (var (orderByLambda, descending) in joinData.OrderByExpressions)
+        {
+            var body = LinqQueryParser.StripConvert(orderByLambda.Body);
+            if (body is MemberExpression memberExpr)
+            {
+                var memberName = memberExpr.Member.Name;
+                var (factory, alias) = memberOriginMap.TryGetValue(memberName, out var origin) && origin == "inner"
+                    ? (innerMemberFactory, "inner_t")
+                    : (outerMemberFactory, "outer_t");
+
+                // Resolve via the correct member factory using the original property on the document type
+                var docProperty = origin == "inner"
+                    ? FindOriginalProperty(joinData, memberName, isOuter: false)
+                    : FindOriginalProperty(joinData, memberName, isOuter: true);
+
+                if (docProperty != null)
+                {
+                    var docMember = factory.ResolveMember(docProperty);
+                    joinStatement.OrderBys.Add((JoinStatement.AliasLocator(docMember.TypedLocator, alias), descending));
+                }
+            }
+        }
+
+        // Build SQL and execute
+        await using var batch = new SqlBatch();
+        var builder = new BatchBuilder(batch);
+        joinStatement.Apply(builder);
+        builder.Compile();
+
+        await using var reader = await _session.ExecuteReaderAsync(batch, token);
+
+        // Handle scalar results (Count, etc.)
+        if (parser.ValueMode is SingleValueMode.Count or SingleValueMode.LongCount)
+        {
+            var scalarHandler = new ScalarHandler<TResult>();
+            return await scalarHandler.HandleAsync(reader, token);
+        }
+
+        // Rewrite the result selector and compile
+        var resultSelector = joinData.SelectManyResultSelector;
+        if (resultSelector == null)
+        {
+            throw new NotSupportedException(
+                "GroupJoin without SelectMany is not supported. Use GroupJoin(...).SelectMany(...).");
+        }
+
+        var rewrittenSelector = JoinResultSelectorRewriter.Rewrite(
+            joinData.GroupJoinResultSelector, resultSelector,
+            joinData.OuterElementType, joinData.InnerElementType);
+
+        // Use reflection to invoke the generic handler
+        return await InvokeJoinHandlerAsync<TResult>(
+            joinData.OuterElementType, joinData.InnerElementType,
+            rewrittenSelector, joinData.IsLeftJoin,
+            reader, parser.ValueMode, token);
+    }
+
+    /// <summary>
+    ///     Builds a map from anonymous result type member names to "outer" or "inner"
+    ///     by tracing through the SelectMany result selector and GroupJoin result selector.
+    /// </summary>
+    private static Dictionary<string, string> BuildMemberOriginMap(GroupJoinData joinData)
+    {
+        var map = new Dictionary<string, string>();
+
+        if (joinData.SelectManyResultSelector?.Body is not NewExpression resultNew || resultNew.Members == null)
+            return map;
+
+        // Parse GroupJoin result selector to know which anonymous member = outer, which = inner collection
+        var groupJoinResultSelector = joinData.GroupJoinResultSelector;
+        var outerParam = groupJoinResultSelector.Parameters[0];
+        var innerCollectionParam = groupJoinResultSelector.Parameters[1];
+        var gjMemberMap = new Dictionary<string, string>(); // member name → "outer" or "inner"
+
+        if (groupJoinResultSelector.Body is NewExpression gjNew && gjNew.Members != null)
+        {
+            for (var i = 0; i < gjNew.Members.Count; i++)
+            {
+                if (gjNew.Arguments[i] == outerParam)
+                    gjMemberMap[gjNew.Members[i].Name] = "outer";
+                else if (gjNew.Arguments[i] == innerCollectionParam)
+                    gjMemberMap[gjNew.Members[i].Name] = "inner";
+            }
+        }
+
+        // Now trace each member of the SelectMany result selector
+        var smTempParam = joinData.SelectManyResultSelector.Parameters[0]; // temp (anonymous from GroupJoin)
+        var smInnerParam = joinData.SelectManyResultSelector.Parameters[1]; // o (inner element)
+
+        for (var i = 0; i < resultNew.Members.Count; i++)
+        {
+            var resultMemberName = resultNew.Members[i].Name;
+            var arg = resultNew.Arguments[i];
+
+            // Trace back to determine origin
+            var origin = TraceExpressionOrigin(arg, smTempParam, smInnerParam, gjMemberMap);
+            if (origin != null)
+            {
+                map[resultMemberName] = origin;
+            }
+        }
+
+        return map;
+    }
+
+    private static string? TraceExpressionOrigin(
+        Expression expr,
+        ParameterExpression tempParam,
+        ParameterExpression innerParam,
+        Dictionary<string, string> gjMemberMap)
+    {
+        // Direct parameter reference: o → inner
+        if (expr == innerParam) return "inner";
+
+        // Member access chain: trace to root
+        if (expr is MemberExpression member)
+        {
+            var root = GetRootExpression(member);
+            if (root == innerParam) return "inner";
+            if (root == tempParam)
+            {
+                // Find the first member after temp: temp.c → "c"
+                var firstMember = GetFirstMemberAfterParam(member, tempParam);
+                if (firstMember != null && gjMemberMap.TryGetValue(firstMember, out var origin))
+                    return origin;
+            }
+        }
+
+        // Conditional (ternary) — check both branches
+        if (expr is ConditionalExpression cond)
+        {
+            return TraceExpressionOrigin(cond.IfTrue, tempParam, innerParam, gjMemberMap)
+                ?? TraceExpressionOrigin(cond.IfFalse, tempParam, innerParam, gjMemberMap);
+        }
+
+        return null;
+    }
+
+    private static Expression GetRootExpression(MemberExpression expr)
+    {
+        Expression current = expr;
+        while (current is MemberExpression m)
+            current = m.Expression!;
+        return current;
+    }
+
+    private static string? GetFirstMemberAfterParam(MemberExpression expr, ParameterExpression param)
+    {
+        var chain = new List<string>();
+        Expression? current = expr;
+        while (current is MemberExpression m)
+        {
+            chain.Insert(0, m.Member.Name);
+            current = m.Expression;
+        }
+
+        // chain[0] is the first member after the parameter (e.g., "c" in temp.c.Name)
+        return chain.Count > 0 && current == param ? chain[0] : null;
+    }
+
+    /// <summary>
+    ///     Finds the original MemberExpression on the document type for an anonymous type member.
+    ///     Traces through the SelectMany result selector to find the source expression.
+    /// </summary>
+    private static MemberExpression? FindOriginalProperty(GroupJoinData joinData, string memberName, bool isOuter)
+    {
+        if (joinData.SelectManyResultSelector?.Body is not NewExpression resultNew || resultNew.Members == null)
+            return null;
+
+        for (var i = 0; i < resultNew.Members.Count; i++)
+        {
+            if (resultNew.Members[i].Name != memberName) continue;
+
+            // Trace the argument back to the document property
+            var arg = resultNew.Arguments[i];
+            return FindDeepestMemberExpression(arg);
+        }
+
+        return null;
+    }
+
+    private static MemberExpression? FindDeepestMemberExpression(Expression expr)
+    {
+        // Walk through member chains to find the deepest member on a document type
+        // e.g., temp.c.Name → we want the MemberExpression for .Name on the document type
+        if (expr is MemberExpression member)
+        {
+            // Create a synthetic member expression on a parameter of the document type
+            // We need to resolve through the document's type, not through anonymous types
+            var rootType = GetUltimateDeclaringType(member);
+            if (rootType != null)
+            {
+                var syntheticParam = Expression.Parameter(rootType, "x");
+                return RebuildMemberAccess(member, syntheticParam);
+            }
+        }
+
+        return null;
+    }
+
+    private static Type? GetUltimateDeclaringType(MemberExpression expr)
+    {
+        Expression? current = expr;
+        Type? lastType = null;
+        while (current is MemberExpression m)
+        {
+            lastType = m.Expression?.Type;
+            current = m.Expression;
+        }
+        return lastType;
+    }
+
+    private static MemberExpression? RebuildMemberAccess(MemberExpression original, ParameterExpression param)
+    {
+        // Collect the member chain from innermost to outermost
+        var chain = new List<System.Reflection.MemberInfo>();
+        Expression? current = original;
+        while (current is MemberExpression m)
+        {
+            chain.Insert(0, m.Member);
+            current = m.Expression;
+        }
+
+        // Skip anonymous type members — start from the first member that exists on the document type
+        Expression result = param;
+        var started = false;
+        foreach (var memberInfo in chain)
+        {
+            if (!started)
+            {
+                // Check if this member exists on the param type (the document type)
+                var prop = param.Type.GetProperty(memberInfo.Name);
+                var field = param.Type.GetField(memberInfo.Name);
+                if (prop != null || field != null)
+                {
+                    started = true;
+                    result = Expression.MakeMemberAccess(result, (System.Reflection.MemberInfo?)prop ?? field!);
+                    continue;
+                }
+                // Skip anonymous type members
+                continue;
+            }
+
+            result = Expression.MakeMemberAccess(result, memberInfo);
+        }
+
+        return result as MemberExpression;
+    }
+
+    private static string ResolveKeyLocator(Expression keyBody, MemberFactory memberFactory)
+    {
+        if (keyBody is MemberExpression memberExpr)
+        {
+            var member = memberFactory.ResolveMember(memberExpr);
+            return member.TypedLocator;
+        }
+
+        throw new NotSupportedException(
+            $"Join key selector must be a member expression, got: {keyBody.NodeType}");
+    }
+
+    private async Task<TResult> InvokeJoinHandlerAsync<TResult>(
+        Type outerType, Type innerType,
+        LambdaExpression rewrittenSelector, bool isLeftJoin,
+        DbDataReader reader, SingleValueMode? valueMode,
+        CancellationToken token)
+    {
+        // Determine the result element type
+        // TResult is IReadOnlyList<TElement> for list results, or TElement for single results
+        Type resultElementType;
+        if (typeof(TResult).IsGenericType &&
+            typeof(TResult).GetGenericTypeDefinition() == typeof(IReadOnlyList<>))
+        {
+            resultElementType = typeof(TResult).GetGenericArguments()[0];
+        }
+        else
+        {
+            resultElementType = typeof(TResult);
+        }
+
+        // Compile the rewritten selector to a Func<TOuter, TInner?, TResultElement>
+        var funcType = typeof(Func<,,>).MakeGenericType(outerType, innerType, resultElementType);
+        var compiledSelector = rewrittenSelector.Compile();
+
+        // Create and invoke JoinListHandler<TOuter, TInner, TResultElement>
+        var handlerType = typeof(JoinListHandler<,,>).MakeGenericType(outerType, innerType, resultElementType);
+        var handler = Activator.CreateInstance(handlerType, _session.Serializer, compiledSelector, isLeftJoin)!;
+
+        var handleMethod = handlerType.GetMethod("HandleAsync")!;
+        var task = (Task)handleMethod.Invoke(handler, [reader, token])!;
+        await task;
+
+        var resultProperty = task.GetType().GetProperty("Result")!;
+        var list = resultProperty.GetValue(task)!;
+
+        // For single-value modes, extract the single element
+        if (valueMode is SingleValueMode.First or SingleValueMode.FirstOrDefault
+            or SingleValueMode.Single or SingleValueMode.SingleOrDefault)
+        {
+            var items = (System.Collections.IList)list;
+            if (valueMode is SingleValueMode.Single or SingleValueMode.SingleOrDefault && items.Count > 1)
+            {
+                throw new InvalidOperationException("Sequence contains more than one element");
+            }
+
+            if (items.Count == 0)
+            {
+                if (valueMode is SingleValueMode.First or SingleValueMode.Single)
+                {
+                    throw new InvalidOperationException("Sequence contains no elements");
+                }
+                return default!;
+            }
+
+            return (TResult)items[0]!;
+        }
+
+        return (TResult)list;
     }
 
     private static void ApplySingleValueMode(LinqQueryParser parser)

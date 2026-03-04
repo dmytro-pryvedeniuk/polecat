@@ -140,13 +140,19 @@ internal class PolecatProjectionBatch : IProjectionBatch<IDocumentSession, IQuer
                     await using var reader = await batch.ExecuteReaderAsync(ct);
 
                     // Process document operation results
+                    var exceptions = new List<Exception>();
                     for (var i = 0; i < allOps.Count; i++)
                     {
-                        await allOps[i].PostprocessAsync(reader, ct);
+                        await allOps[i].PostprocessAsync(reader, exceptions, ct);
                         if (i < totalCommands - 1)
                         {
                             await reader.NextResultAsync(ct);
                         }
+                    }
+
+                    if (exceptions.Count > 0)
+                    {
+                        throw new AggregateException(exceptions);
                     }
                     // Progress ops don't need result processing
                 }

@@ -116,6 +116,6 @@ public class projection_progression_tests : IntegrationContext
         op.ConfigureCommand(builder);
         builder.Compile();
         await using var reader = await batch.ExecuteReaderAsync(CancellationToken.None);
-        await op.PostprocessAsync(reader, CancellationToken.None);
+        await op.PostprocessAsync(reader, new List<Exception>(), CancellationToken.None);
     }
 }

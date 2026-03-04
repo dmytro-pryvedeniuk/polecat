@@ -16,7 +16,8 @@ internal static class MethodCallParserRegistry
         new StringIsNullOrEmpty(),
         new IsOneOf(),
         new EnumerableContains(),
-        new IsEmpty()
+        new IsEmpty(),
+        new ObjectEquals()
     ];
 
     public static IMethodCallParser? FindParser(MethodCallExpression expression)

@@ -2,6 +2,7 @@ using System.Linq.Expressions;
 using System.Reflection;
 using JasperFx.Events;
 using Polecat.Internal;
+using Weasel.Core;
 
 namespace Polecat.Projections.Flattened;
 
@@ -48,7 +49,7 @@ internal class EventDeleter<TEvent> : IFlatTableEventHandler
         if (_compiledSql == null || _primaryKeySetter == null)
             throw new InvalidOperationException("EventDeleter has not been compiled.");
 
-        return new FlatTableSqlOperation(_compiledSql, e, [_primaryKeySetter], OperationRole.Delete);
+        return new FlatTableSqlOperation(_compiledSql, e, [_primaryKeySetter], OperationRole.Deletion);
     }
 
     private static IParameterSetter BuildSetterForMembers(MemberInfo[] members)

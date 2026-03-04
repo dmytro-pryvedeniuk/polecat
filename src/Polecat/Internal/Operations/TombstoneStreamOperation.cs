@@ -1,5 +1,6 @@
 using System.Data.Common;
 using Polecat.Events;
+using Weasel.Core;
 using Weasel.SqlServer;
 
 namespace Polecat.Internal.Operations;
@@ -18,7 +19,7 @@ internal class TombstoneStreamOperation : IStorageOperation
     }
 
     public Type DocumentType => typeof(object);
-    public OperationRole Role => OperationRole.Delete;
+    public OperationRole Role() => OperationRole.Deletion;
 
     public void ConfigureCommand(ICommandBuilder builder)
     {
@@ -31,5 +32,5 @@ internal class TombstoneStreamOperation : IStorageOperation
         builder.AddParameters(new Dictionary<string, object?> { ["id"] = _streamId, ["tenant_id"] = _tenantId });
     }
 
-    public Task PostprocessAsync(DbDataReader reader, CancellationToken token) => Task.CompletedTask;
+    public Task PostprocessAsync(DbDataReader reader, IList<Exception> exceptions, CancellationToken token) => Task.CompletedTask;
 }

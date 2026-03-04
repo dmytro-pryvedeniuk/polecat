@@ -8,10 +8,16 @@ namespace Polecat.Linq.SqlGeneration;
 internal class TenantInFilter : ISqlFragment
 {
     private readonly string[] _tenantIds;
+    private readonly string _columnName;
 
-    public TenantInFilter(string[] tenantIds)
+    public TenantInFilter(string[] tenantIds) : this(tenantIds, "tenant_id")
+    {
+    }
+
+    public TenantInFilter(string[] tenantIds, string columnName)
     {
         _tenantIds = tenantIds;
+        _columnName = columnName;
     }
 
     public void Apply(ICommandBuilder builder)
@@ -22,7 +28,8 @@ internal class TenantInFilter : ISqlFragment
             return;
         }
 
-        builder.Append("tenant_id IN (");
+        builder.Append(_columnName);
+        builder.Append(" IN (");
         for (var i = 0; i < _tenantIds.Length; i++)
         {
             if (i > 0) builder.Append(", ");

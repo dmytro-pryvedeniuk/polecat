@@ -1,4 +1,5 @@
 using System.Linq.Expressions;
+using Polecat.Linq.Joins;
 using Polecat.Linq.Members;
 using Polecat.Linq.Metadata;
 using Polecat.Linq.SoftDeletes;
@@ -18,6 +19,11 @@ internal class LinqQueryParser : ExpressionVisitor
 
     public Statement Statement { get; }
     public SingleValueMode? ValueMode { get; private set; }
+
+    /// <summary>
+    ///     If a GroupJoin+SelectMany pattern was detected, holds the parsed join data.
+    /// </summary>
+    public GroupJoinData? GroupJoinData { get; private set; }
 
     /// <summary>
     ///     For aggregation methods (Sum, Min, Max, Average), the member selector expression.
@@ -94,6 +100,14 @@ internal class LinqQueryParser : ExpressionVisitor
 
     protected override Expression VisitMethodCall(MethodCallExpression node)
     {
+        // For GroupJoin, handle the outer source visit internally and set GroupJoinData.
+        // We must not let the default Arguments[0] visit run, since HandleGroupJoin does it.
+        if (node.Method.Name == "GroupJoin")
+        {
+            HandleGroupJoin(node);
+            return node;
+        }
+
         // Visit the source (first argument for Queryable extension methods)
         if (node.Arguments.Count > 0)
         {
@@ -102,20 +116,37 @@ internal class LinqQueryParser : ExpressionVisitor
 
         switch (node.Method.Name)
         {
+            // SelectMany after GroupJoin: capture selectors for the join pattern.
+            // GroupJoinData is set by visiting Arguments[0] above (the GroupJoin node).
+            case "SelectMany" when GroupJoinData != null:
+                HandleSelectManyAfterGroupJoin(node);
+                return node;
             case "Where":
                 HandleWhere(node);
                 break;
             case "OrderBy":
-                HandleOrderBy(node, descending: false, replace: true);
+                if (GroupJoinData != null)
+                    HandleGroupJoinOrderBy(node, descending: false, replace: true);
+                else
+                    HandleOrderBy(node, descending: false, replace: true);
                 break;
             case "OrderByDescending":
-                HandleOrderBy(node, descending: true, replace: true);
+                if (GroupJoinData != null)
+                    HandleGroupJoinOrderBy(node, descending: true, replace: true);
+                else
+                    HandleOrderBy(node, descending: true, replace: true);
                 break;
             case "ThenBy":
-                HandleOrderBy(node, descending: false, replace: false);
+                if (GroupJoinData != null)
+                    HandleGroupJoinOrderBy(node, descending: false, replace: false);
+                else
+                    HandleOrderBy(node, descending: false, replace: false);
                 break;
             case "ThenByDescending":
-                HandleOrderBy(node, descending: true, replace: false);
+                if (GroupJoinData != null)
+                    HandleGroupJoinOrderBy(node, descending: true, replace: false);
+                else
+                    HandleOrderBy(node, descending: true, replace: false);
                 break;
             case "Take":
                 HandleTake(node);
@@ -198,6 +229,74 @@ internal class LinqQueryParser : ExpressionVisitor
         }
 
         return node;
+    }
+
+    private void HandleGroupJoin(MethodCallExpression node)
+    {
+        // GroupJoin(outer, inner, outerKeySelector, innerKeySelector, resultSelector)
+        // Arguments: [0]=outer source, [1]=inner source, [2]=outerKey, [3]=innerKey, [4]=resultSelector
+
+        // Visit the outer source first (for any Where clauses applied before GroupJoin)
+        Visit(node.Arguments[0]);
+
+        var outerType = node.Method.GetGenericArguments()[0];
+        var innerType = node.Method.GetGenericArguments()[1];
+
+        GroupJoinData = new GroupJoinData
+        {
+            InnerSourceExpression = node.Arguments[1],
+            OuterKeySelector = GetLambda(node.Arguments[2]),
+            InnerKeySelector = GetLambda(node.Arguments[3]),
+            GroupJoinResultSelector = GetLambda(node.Arguments[4]),
+            OuterElementType = outerType,
+            InnerElementType = innerType
+        };
+    }
+
+    private void HandleSelectManyAfterGroupJoin(MethodCallExpression node)
+    {
+        // SelectMany(source, collectionSelector, resultSelector)
+        // Arguments: [0]=source (the GroupJoin result), [1]=collectionSelector, [2]=resultSelector
+
+        var collectionSelector = GetLambda(node.Arguments[1]);
+        GroupJoinData!.SelectManyCollectionSelector = collectionSelector;
+
+        if (node.Arguments.Count > 2)
+        {
+            GroupJoinData.SelectManyResultSelector = GetLambda(node.Arguments[2]);
+        }
+
+        // Detect DefaultIfEmpty in the collection selector body to determine LEFT JOIN
+        GroupJoinData.IsLeftJoin = ContainsDefaultIfEmpty(collectionSelector.Body);
+    }
+
+    private static bool ContainsDefaultIfEmpty(Expression expression)
+    {
+        if (expression is MethodCallExpression methodCall)
+        {
+            if (methodCall.Method.Name == "DefaultIfEmpty")
+                return true;
+
+            // Check nested calls
+            foreach (var arg in methodCall.Arguments)
+            {
+                if (ContainsDefaultIfEmpty(arg))
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void HandleGroupJoinOrderBy(MethodCallExpression node, bool descending, bool replace)
+    {
+        if (replace)
+        {
+            GroupJoinData!.OrderByExpressions.Clear();
+        }
+
+        var lambda = GetLambda(node.Arguments[1]);
+        GroupJoinData!.OrderByExpressions.Add((lambda, descending));
     }
 
     private void HandleWhere(MethodCallExpression node)
@@ -385,7 +484,7 @@ internal class LinqQueryParser : ExpressionVisitor
         return Expression.Lambda(expression).Compile().DynamicInvoke()!;
     }
 
-    private static Expression StripConvert(Expression expression)
+    internal static Expression StripConvert(Expression expression)
     {
         while (expression is UnaryExpression { NodeType: ExpressionType.Convert } unary)
         {

@@ -2,6 +2,7 @@ using System.Data.Common;
 using JasperFx;
 using Polecat.Metadata;
 using Polecat.Storage;
+using Weasel.Core;
 using Weasel.SqlServer;
 
 namespace Polecat.Internal.Operations;
@@ -31,7 +32,7 @@ internal class UpdateOperation : IStorageOperation
     }
 
     public Type DocumentType => _mapping.DocumentType;
-    public OperationRole Role => OperationRole.Update;
+    public OperationRole Role() => OperationRole.Update;
     public object? DocumentId => _id;
     public object Document => _document;
 
@@ -100,7 +101,7 @@ internal class UpdateOperation : IStorageOperation
         });
     }
 
-    public async Task PostprocessAsync(DbDataReader reader, CancellationToken token)
+    public async Task PostprocessAsync(DbDataReader reader, IList<Exception> exceptions, CancellationToken token)
     {
         if (await reader.ReadAsync(token))
         {

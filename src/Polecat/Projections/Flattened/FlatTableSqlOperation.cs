@@ -2,6 +2,7 @@ using System.Data.Common;
 using JasperFx.Events;
 using Microsoft.Data.SqlClient;
 using Polecat.Internal;
+using Weasel.Core;
 using Weasel.SqlServer;
 
 namespace Polecat.Projections.Flattened;
@@ -9,7 +10,7 @@ namespace Polecat.Projections.Flattened;
 /// <summary>
 ///     A storage operation that executes a flat table MERGE or DELETE statement.
 /// </summary>
-internal class FlatTableSqlOperation : IStorageOperation
+internal class FlatTableSqlOperation : Polecat.Internal.IStorageOperation
 {
     private readonly string _sql;
     private readonly IEvent _source;
@@ -21,11 +22,13 @@ internal class FlatTableSqlOperation : IStorageOperation
         _sql = sql;
         _source = source;
         _parameterSetters = parameterSetters;
-        Role = role;
+        _role = role;
     }
 
+    private readonly OperationRole _role;
+
     public Type DocumentType => typeof(object);
-    public OperationRole Role { get; }
+    public OperationRole Role() => _role;
 
     public void ConfigureCommand(ICommandBuilder builder)
     {
@@ -39,5 +42,5 @@ internal class FlatTableSqlOperation : IStorageOperation
         }
     }
 
-    public Task PostprocessAsync(DbDataReader reader, CancellationToken token) => Task.CompletedTask;
+    public Task PostprocessAsync(DbDataReader reader, IList<Exception> exceptions, CancellationToken token) => Task.CompletedTask;
 }

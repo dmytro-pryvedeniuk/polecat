@@ -86,6 +86,16 @@ public abstract class OneOffConfigurationsContext : IAsyncLifetime
         cmd.CommandText = $"""
             IF SCHEMA_ID('{_schemaName}') IS NOT NULL
             BEGIN
+                -- Drop all foreign keys first to avoid dependency ordering issues
+                DECLARE @fksql NVARCHAR(MAX) = '';
+                SELECT @fksql += 'ALTER TABLE ' + QUOTENAME(s.name) + '.' + QUOTENAME(t.name)
+                    + ' DROP CONSTRAINT ' + QUOTENAME(fk.name) + ';' + CHAR(13)
+                FROM sys.foreign_keys fk
+                JOIN sys.tables t ON fk.parent_object_id = t.object_id
+                JOIN sys.schemas s ON t.schema_id = s.schema_id
+                WHERE s.name = '{_schemaName}';
+                IF LEN(@fksql) > 0 EXEC sp_executesql @fksql;
+
                 DECLARE @sql NVARCHAR(MAX) = '';
                 SELECT @sql += 'DROP TABLE IF EXISTS ' + QUOTENAME(s.name) + '.' + QUOTENAME(t.name) + ';' + CHAR(13)
                 FROM sys.tables t

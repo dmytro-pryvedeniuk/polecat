@@ -1,6 +1,7 @@
 using System.Data.Common;
 using JasperFx.Events.Projections;
 using Polecat.Internal;
+using Weasel.Core;
 using Weasel.SqlServer;
 
 namespace Polecat.Events.Daemon.Progress;
@@ -8,7 +9,7 @@ namespace Polecat.Events.Daemon.Progress;
 /// <summary>
 ///     Inserts an initial projection progression row into pc_event_progression.
 /// </summary>
-internal class InsertProjectionProgress : IStorageOperation
+internal class InsertProjectionProgress : Polecat.Internal.IStorageOperation
 {
     private readonly EventGraph _events;
     private readonly EventRange _range;
@@ -20,7 +21,7 @@ internal class InsertProjectionProgress : IStorageOperation
     }
 
     public Type DocumentType => typeof(ShardState);
-    public OperationRole Role => OperationRole.Insert;
+    public OperationRole Role() => OperationRole.Insert;
 
     public void ConfigureCommand(ICommandBuilder builder)
     {
@@ -36,5 +37,5 @@ internal class InsertProjectionProgress : IStorageOperation
         });
     }
 
-    public Task PostprocessAsync(DbDataReader reader, CancellationToken token) => Task.CompletedTask;
+    public Task PostprocessAsync(DbDataReader reader, IList<Exception> exceptions, CancellationToken token) => Task.CompletedTask;
 }

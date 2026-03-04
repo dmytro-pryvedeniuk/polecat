@@ -44,8 +44,16 @@ internal class QueryEventStore : IQueryEventStore
     {
         await using var cmd = new SqlCommand();
 
+        var eventOptions = _events.EventOptions;
+
+        // Build SELECT columns dynamically for optional metadata
+        var selectColumns = "seq_id, id, stream_id, version, data, type, timestamp, tenant_id, dotnet_type, is_archived";
+        if (eventOptions.EnableCorrelationId) selectColumns += ", correlation_id";
+        if (eventOptions.EnableCausationId) selectColumns += ", causation_id";
+        if (eventOptions.EnableHeaders) selectColumns += ", headers";
+
         var sql = $"""
-            SELECT seq_id, id, stream_id, version, data, type, timestamp, tenant_id, dotnet_type, is_archived
+            SELECT {selectColumns}
             FROM {_events.EventsTableName}
             WHERE stream_id = @stream_id AND tenant_id = @tenant_id AND is_archived = 0
             """;
@@ -106,6 +114,29 @@ internal class QueryEventStore : IQueryEventStore
             @event.EventTypeName = typeName;
             @event.DotNetTypeName = dotNetTypeName!;
             @event.IsArchived = isArchived;
+
+            // Read optional metadata columns (indices 10+ based on what's enabled)
+            var metaIndex = 10;
+            if (eventOptions.EnableCorrelationId)
+            {
+                @event.CorrelationId = reader.IsDBNull(metaIndex) ? null : reader.GetString(metaIndex);
+                metaIndex++;
+            }
+
+            if (eventOptions.EnableCausationId)
+            {
+                @event.CausationId = reader.IsDBNull(metaIndex) ? null : reader.GetString(metaIndex);
+                metaIndex++;
+            }
+
+            if (eventOptions.EnableHeaders)
+            {
+                if (!reader.IsDBNull(metaIndex))
+                {
+                    var headersJson = reader.GetString(metaIndex);
+                    @event.Headers = _session.Serializer.FromJson<Dictionary<string, object>>(headersJson);
+                }
+            }
 
             if (_events.StreamIdentity == StreamIdentity.AsGuid)
             {

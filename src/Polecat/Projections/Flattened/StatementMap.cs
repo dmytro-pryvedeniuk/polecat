@@ -2,6 +2,7 @@ using System.Linq.Expressions;
 using System.Reflection;
 using JasperFx.Events;
 using Polecat.Internal;
+using Weasel.Core;
 using Weasel.SqlServer.Tables;
 
 namespace Polecat.Projections.Flattened;

@@ -1,6 +1,7 @@
 using System.Data.Common;
 using Polecat.Internal;
 using Polecat.Serialization;
+using Weasel.Core;
 using Polecat.Storage;
 using Weasel.SqlServer;
 
@@ -10,7 +11,7 @@ namespace Polecat.Patching;
 ///     IStorageOperation that generates SQL UPDATE statements using JSON_MODIFY()
 ///     to patch document JSON data in-place.
 /// </summary>
-internal class PatchOperation : IStorageOperation
+internal class PatchOperation : Polecat.Internal.IStorageOperation
 {
     private readonly DocumentMapping _mapping;
     private readonly List<Action<ICommandBuilder>> _actions;
@@ -25,7 +26,7 @@ internal class PatchOperation : IStorageOperation
     }
 
     public Type DocumentType => _mapping.DocumentType;
-    public OperationRole Role => OperationRole.Patch;
+    public OperationRole Role() => OperationRole.Patch;
 
     public void ConfigureCommand(ICommandBuilder builder)
     {
@@ -39,7 +40,7 @@ internal class PatchOperation : IStorageOperation
         }
     }
 
-    public Task PostprocessAsync(DbDataReader reader, CancellationToken token) => Task.CompletedTask;
+    public Task PostprocessAsync(DbDataReader reader, IList<Exception> exceptions, CancellationToken token) => Task.CompletedTask;
 
     // --- Static helpers for building JSON_MODIFY expressions ---
 
