@@ -62,7 +62,7 @@ public partial class DocumentStore : IEventStore<IDocumentSession, IQuerySession
     Uri IEventStore.Subject => Database.DatabaseUri;
 
     Type IEventStore<IDocumentSession, IQuerySession>.IdentityTypeForProjectedType(Type aggregateType) =>
-        Options.Events.StreamIdentity == StreamIdentity.AsGuid ? typeof(Guid) : typeof(string);
+        Events.StreamIdentity == StreamIdentity.AsGuid ? typeof(Guid) : typeof(string);
 
     IDocumentSession IEventStore<IDocumentSession, IQuerySession>.OpenSession(IEventDatabase database) =>
         LightweightSession();

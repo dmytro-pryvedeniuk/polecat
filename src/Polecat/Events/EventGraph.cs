@@ -14,7 +14,7 @@ namespace Polecat.Events;
 ///     Analogous to Marten's EventGraph. Manages event type registration
 ///     and wrapping of raw event data into IEvent instances.
 /// </summary>
-public class EventGraph : IEventRegistry, IAggregationSourceFactory<IQuerySession>
+public class EventGraph : EventRegistry, IAggregationSourceFactory<IQuerySession>
 {
     private readonly StoreOptions _options;
     private readonly ConcurrentDictionary<Type, PolecatEventType> _eventTypes = new();
@@ -23,12 +23,13 @@ public class EventGraph : IEventRegistry, IAggregationSourceFactory<IQuerySessio
     internal EventGraph(StoreOptions options)
     {
         _options = options;
+        AppendMode = EventAppendMode.Quick;
     }
 
     /// <summary>
     ///     Controls whether streams are identified by Guid or string.
     /// </summary>
-    public StreamIdentity StreamIdentity
+    public override StreamIdentity StreamIdentity
     {
         get => _options.Events.StreamIdentity;
         set => _options.Events.StreamIdentity = value;
@@ -58,14 +59,16 @@ public class EventGraph : IEventRegistry, IAggregationSourceFactory<IQuerySessio
     internal string EventsTableName => $"[{DatabaseSchemaName}].[pc_events]";
     internal string ProgressionTableName => $"[{DatabaseSchemaName}].[pc_event_progression]";
 
-    // IEventRegistry members
-    public EventAppendMode AppendMode { get; set; } = EventAppendMode.Quick;
-    public TimeProvider TimeProvider { get; set; } = TimeProvider.System;
+    public override EventAppendMode AppendMode
+    {
+        get => base.AppendMode;
+        set => base.AppendMode = value;
+    }
 
     /// <summary>
     ///     Wrap raw event data into an IEvent instance with type metadata.
     /// </summary>
-    public IEvent BuildEvent(object eventData)
+    public override IEvent BuildEvent(object eventData)
     {
         ArgumentNullException.ThrowIfNull(eventData);
 
@@ -84,14 +87,12 @@ public class EventGraph : IEventRegistry, IAggregationSourceFactory<IQuerySessio
     /// <summary>
     ///     Get or create event type metadata for the given .NET type.
     /// </summary>
-    public PolecatEventType EventMappingFor(Type eventType)
+    public override PolecatEventType EventMappingFor(Type eventType)
     {
         return _eventTypes.GetOrAdd(eventType, static type => new PolecatEventType(type));
     }
 
-    IEventType IEventRegistry.EventMappingFor(Type eventType) => EventMappingFor(eventType);
-
-    public void AddEventType(Type eventType)
+    public override void AddEventType(Type eventType)
     {
         EventMappingFor(eventType);
     }
@@ -111,14 +112,14 @@ public class EventGraph : IEventRegistry, IAggregationSourceFactory<IQuerySessio
         return projection as IAggregatorSource<IQuerySession>;
     }
 
-    public Type AggregateTypeFor(string aggregateTypeName)
+    public override Type AggregateTypeFor(string aggregateTypeName)
     {
         if (_aggregateTypes.TryGetValue(aggregateTypeName, out var type)) return type;
         throw new ArgumentOutOfRangeException(nameof(aggregateTypeName),
             $"Unknown aggregate type name '{aggregateTypeName}'.");
     }
 
-    public string AggregateAliasFor(Type aggregateType)
+    public override string AggregateAliasFor(Type aggregateType)
     {
         _aggregateTypes.TryAdd(aggregateType.Name, aggregateType);
         return aggregateType.Name;
