@@ -1,4 +1,6 @@
 using JasperFx.Events;
+using JasperFx.Events.Tags;
+using Polecat.Events.Dcb;
 
 namespace Polecat.Events;
 
@@ -137,4 +139,24 @@ public interface IEventOperations : IQueryEventStore
     ///     Permanently delete a stream and all its events (hard DELETE) by string key.
     /// </summary>
     void TombstoneStream(string streamKey);
+
+    /// <summary>
+    ///     Query events across streams by tag conditions (DCB support).
+    /// </summary>
+    Task<IReadOnlyList<IEvent>> QueryByTagsAsync(EventTagQuery query, CancellationToken cancellation = default);
+
+    /// <summary>
+    ///     Aggregate events matching tag conditions into a live aggregate (DCB support).
+    /// </summary>
+    Task<T?> AggregateByTagsAsync<T>(EventTagQuery query, CancellationToken cancellation = default) where T : class;
+
+    /// <summary>
+    ///     Fetch events by tags and return a writable boundary with DCB consistency checking.
+    /// </summary>
+    Task<IEventBoundary<T>> FetchForWritingByTags<T>(EventTagQuery query, CancellationToken cancellation = default) where T : class;
+
+    /// <summary>
+    ///     Build an IEvent wrapper for raw event data. Useful for setting tags before appending.
+    /// </summary>
+    IEvent BuildEvent(object data);
 }

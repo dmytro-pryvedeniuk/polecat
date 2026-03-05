@@ -191,6 +191,11 @@ internal static class SchemaInspector
 
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $"""
+            DECLARE @sql NVARCHAR(MAX) = '';
+            SELECT @sql = @sql + 'DROP TABLE [{schema}].[' + TABLE_NAME + ']; '
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME LIKE 'pc_event_tag_%';
+            EXEC sp_executesql @sql;
             IF OBJECT_ID('{schema}.pc_events', 'U') IS NOT NULL DROP TABLE [{schema}].pc_events;
             IF OBJECT_ID('{schema}.pc_streams', 'U') IS NOT NULL DROP TABLE [{schema}].pc_streams;
             IF OBJECT_ID('{schema}.pc_event_progression', 'U') IS NOT NULL DROP TABLE [{schema}].pc_event_progression;

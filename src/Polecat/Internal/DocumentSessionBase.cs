@@ -291,6 +291,15 @@ internal abstract class DocumentSessionBase : QuerySession, IDocumentSession
             // Process event streams first
             foreach (var stream in _workTracker.Streams)
             {
+                // Handle AlwaysEnforceConsistency with no events — just assert version
+                if (!stream.Events.Any() && stream.AlwaysEnforceConsistency && stream.ExpectedVersionOnServer.HasValue)
+                {
+                    await AssertStreamVersionAsync(stream, token);
+                    continue;
+                }
+
+                if (!stream.Events.Any()) continue;
+
                 if (stream.ActionType == StreamActionType.Start)
                 {
                     await ProcessStartStreamAsync(stream, token);
@@ -466,6 +475,38 @@ internal abstract class DocumentSessionBase : QuerySession, IDocumentSession
         }
     }
 
+    private async Task AssertStreamVersionAsync(StreamAction stream, CancellationToken token)
+    {
+        var streamId = _eventGraph.StreamIdentity == JasperFx.Events.StreamIdentity.AsGuid
+            ? (object)stream.Id
+            : stream.Key!;
+
+        await using var cmd = new SqlCommand();
+        cmd.CommandText =
+            $"SELECT version FROM {_eventGraph.StreamsTableName} WHERE id = @id AND tenant_id = @tenant_id;";
+        cmd.Parameters.AddWithValue("@id", streamId);
+        cmd.Parameters.AddWithValue("@tenant_id", TenantId);
+
+        await using var reader = await ExecuteReaderAsync(cmd, token);
+        if (!await reader.ReadAsync(token))
+        {
+            // Stream doesn't exist — consistent only if expected version is 0
+            if (stream.ExpectedVersionOnServer!.Value != 0)
+            {
+                throw new EventStreamUnexpectedMaxEventIdException(streamId, stream.AggregateType,
+                    stream.ExpectedVersionOnServer.Value, 0);
+            }
+            return;
+        }
+
+        var actualVersion = reader.GetInt64(0);
+        if (actualVersion != stream.ExpectedVersionOnServer!.Value)
+        {
+            throw new EventStreamUnexpectedMaxEventIdException(streamId, stream.AggregateType,
+                stream.ExpectedVersionOnServer.Value, actualVersion);
+        }
+    }
+
     private async Task ProcessAppendStreamAsync(StreamAction stream, CancellationToken token)
     {
         var streamId = _eventGraph.StreamIdentity == JasperFx.Events.StreamIdentity.AsGuid
@@ -626,6 +667,33 @@ internal abstract class DocumentSessionBase : QuerySession, IDocumentSession
 
         var seqId = (long)(await ExecuteScalarAsync(cmd, token))!;
         @event.Sequence = seqId;
+
+        // Insert tag rows for DCB support
+        await InsertEventTagsAsync(@event, seqId, token);
+    }
+
+    private async Task InsertEventTagsAsync(IEvent @event, long seqId, CancellationToken token)
+    {
+        var tags = @event.Tags;
+        if (tags == null || tags.Count == 0 || _eventGraph.TagTypes.Count == 0) return;
+
+        var schema = _eventGraph.DatabaseSchemaName;
+
+        foreach (var tag in tags)
+        {
+            var registration = _eventGraph.FindTagType(tag.TagType);
+            if (registration == null) continue;
+
+            await using var tagCmd = new SqlCommand();
+            tagCmd.CommandText = $"""
+                IF NOT EXISTS (SELECT 1 FROM [{schema}].[pc_event_tag_{registration.TableSuffix}] WHERE value = @value AND seq_id = @seq_id)
+                INSERT INTO [{schema}].[pc_event_tag_{registration.TableSuffix}] (value, seq_id) VALUES (@value, @seq_id);
+                """;
+            tagCmd.Parameters.AddWithValue("@value", tag.Value);
+            tagCmd.Parameters.AddWithValue("@seq_id", seqId);
+
+            await ExecuteScalarAsync(tagCmd, token);
+        }
     }
 
     // IStorageOperations

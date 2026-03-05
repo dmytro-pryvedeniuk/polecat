@@ -2,6 +2,7 @@ using System.Text.Json;
 using JasperFx;
 using JasperFx.Events;
 using JasperFx.Events.Daemon;
+using JasperFx.Events.Tags;
 using Polly;
 using Polecat.Events;
 using Polecat.Internal;
@@ -30,6 +31,7 @@ public class StoreOptions
     public StoreOptions()
     {
         EventGraph = new EventGraph(this);
+        Events.EventGraph = EventGraph;
         Projections = new PolecatProjectionOptions(EventGraph);
         Projections.SetStoreOptions(this);
         ResiliencePipeline = new ResiliencePipelineBuilder().AddPolecatDefaults().Build();
@@ -243,6 +245,8 @@ public class StoreOptions
 /// </summary>
 public class EventStoreOptions
 {
+    internal EventGraph? EventGraph { get; set; }
+
     /// <summary>
     ///     Controls whether streams are identified by Guid or string.
     ///     Defaults to AsGuid.
@@ -275,6 +279,23 @@ public class EventStoreOptions
     ///     Enable tracking of custom headers metadata on events.
     /// </summary>
     public bool EnableHeaders { get; set; }
+
+    /// <summary>
+    ///     Register a tag type for Dynamic Consistency Boundary (DCB) support.
+    ///     Creates a tag table with an auto-generated suffix.
+    /// </summary>
+    public TagTypeRegistration RegisterTagType<TTag>()
+    {
+        return EventGraph!.RegisterTagType<TTag>();
+    }
+
+    /// <summary>
+    ///     Register a tag type with an explicit table suffix for DCB support.
+    /// </summary>
+    public TagTypeRegistration RegisterTagType<TTag>(string tableSuffix)
+    {
+        return EventGraph!.RegisterTagType<TTag>(tableSuffix);
+    }
 }
 
 /// <summary>

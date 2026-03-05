@@ -3,6 +3,7 @@ using System.Text;
 using JasperFx.Events;
 using JasperFx.Events.Aggregation;
 using JasperFx.Events.Projections;
+using JasperFx.Events.Tags;
 using Polecat.Events.Schema;
 using Polecat.Projections;
 using Polecat.Serialization;
@@ -19,6 +20,7 @@ public class EventGraph : EventRegistry, IAggregationSourceFactory<IQuerySession
     private readonly StoreOptions _options;
     private readonly ConcurrentDictionary<Type, PolecatEventType> _eventTypes = new();
     private readonly ConcurrentDictionary<string, Type> _aggregateTypes = new();
+    private readonly List<TagTypeRegistration> _tagTypes = new();
 
     internal EventGraph(StoreOptions options)
     {
@@ -147,6 +149,36 @@ public class EventGraph : EventRegistry, IAggregationSourceFactory<IQuerySession
     internal EventProgressionTable BuildEventProgressionTable()
     {
         return new EventProgressionTable(DatabaseSchemaName);
+    }
+
+    public TagTypeRegistration RegisterTagType<TTag>()
+    {
+        var existing = _tagTypes.FirstOrDefault(t => t.TagType == typeof(TTag));
+        if (existing != null) return existing;
+        var registration = new TagTypeRegistration(typeof(TTag));
+        _tagTypes.Add(registration);
+        return registration;
+    }
+
+    public TagTypeRegistration RegisterTagType<TTag>(string tableSuffix)
+    {
+        var existing = _tagTypes.FirstOrDefault(t => t.TagType == typeof(TTag));
+        if (existing != null) return existing;
+        var registration = new TagTypeRegistration(typeof(TTag), tableSuffix);
+        _tagTypes.Add(registration);
+        return registration;
+    }
+
+    public IReadOnlyList<TagTypeRegistration> TagTypes => _tagTypes;
+
+    public TagTypeRegistration? FindTagType(Type tagType)
+    {
+        return _tagTypes.FirstOrDefault(t => t.TagType == tagType);
+    }
+
+    internal EventTagTable BuildEventTagTable(TagTypeRegistration registration)
+    {
+        return new EventTagTable(this, registration);
     }
 
     /// <summary>

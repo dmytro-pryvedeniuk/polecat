@@ -43,6 +43,11 @@ public class DefaultStoreFixture : IAsyncLifetime
 
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
+            DECLARE @sql NVARCHAR(MAX) = '';
+            SELECT @sql = @sql + 'DROP TABLE [dbo].[' + TABLE_NAME + ']; '
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME LIKE 'pc_event_tag_%';
+            EXEC sp_executesql @sql;
             IF OBJECT_ID('dbo.pc_events', 'U') IS NOT NULL DROP TABLE dbo.pc_events;
             IF OBJECT_ID('dbo.pc_streams', 'U') IS NOT NULL DROP TABLE dbo.pc_streams;
             IF OBJECT_ID('dbo.pc_event_progression', 'U') IS NOT NULL DROP TABLE dbo.pc_event_progression;
@@ -57,6 +62,11 @@ public class DefaultStoreFixture : IAsyncLifetime
 
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
+            DECLARE @sql NVARCHAR(MAX) = '';
+            SELECT @sql = @sql + 'DELETE FROM [dbo].[' + TABLE_NAME + ']; '
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME LIKE 'pc_event_tag_%';
+            EXEC sp_executesql @sql;
             DELETE FROM dbo.pc_events;
             DELETE FROM dbo.pc_streams;
             DELETE FROM dbo.pc_event_progression;

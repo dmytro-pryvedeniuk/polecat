@@ -106,6 +106,7 @@ const config: UserConfig<DefaultTheme.Config> = {
             { text: 'Metadata', link: '/events/metadata' },
             { text: 'Archiving Streams', link: '/events/archiving' },
             { text: 'Snapshots', link: '/events/snapshots' },
+            { text: 'Dynamic Consistency Boundary', link: '/events/dcb' },
             {
               text: 'Projections Overview', link: '/events/projections/', collapsed: true, items: [
                 { text: 'Single Stream Projections', link: '/events/projections/single-stream-projections' },

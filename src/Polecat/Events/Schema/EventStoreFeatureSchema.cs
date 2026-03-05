@@ -26,5 +26,11 @@ internal class EventStoreFeatureSchema : FeatureSchemaBase
         yield return _events.BuildStreamsTable();
         yield return _events.BuildEventsTable();
         yield return _events.BuildEventProgressionTable();
+
+        // Tag tables for DCB support
+        foreach (var tagRegistration in _events.TagTypes)
+        {
+            yield return _events.BuildEventTagTable(tagRegistration);
+        }
     }
 }

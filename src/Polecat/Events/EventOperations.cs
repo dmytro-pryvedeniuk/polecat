@@ -1,5 +1,8 @@
+using System.Text;
 using JasperFx.Events;
+using JasperFx.Events.Tags;
 using Microsoft.Data.SqlClient;
+using Polecat.Events.Dcb;
 using Polecat.Internal;
 using Polecat.Internal.Operations;
 
@@ -341,6 +344,156 @@ internal class EventOperations : QueryEventStore, IEventOperations
         {
             return new EventStream<T>(_sessionBase, _events, (string)streamId, aggregate, cancellation, action);
         }
+    }
+
+    public IEvent BuildEvent(object data) => _events.BuildEvent(data);
+
+    public async Task<IReadOnlyList<IEvent>> QueryByTagsAsync(EventTagQuery query,
+        CancellationToken cancellation = default)
+    {
+        var conditions = query.Conditions;
+        if (conditions.Count == 0)
+            throw new ArgumentException("EventTagQuery must have at least one condition.");
+
+        var distinctTagTypes = conditions.Select(c => c.TagType).Distinct().ToList();
+        var schema = _events.DatabaseSchemaName;
+        var eventOptions = _events.EventOptions;
+
+        // Build SELECT columns matching the event reader format
+        var selectColumns = "e.seq_id, e.id, e.stream_id, e.version, e.data, e.type, e.timestamp, e.tenant_id, e.dotnet_type, e.is_archived";
+        if (eventOptions.EnableCorrelationId) selectColumns += ", e.correlation_id";
+        if (eventOptions.EnableCausationId) selectColumns += ", e.causation_id";
+        if (eventOptions.EnableHeaders) selectColumns += ", e.headers";
+
+        var sb = new StringBuilder();
+        sb.Append($"SELECT {selectColumns} FROM [{schema}].[pc_events] e");
+
+        // INNER JOINs to tag tables
+        for (var i = 0; i < distinctTagTypes.Count; i++)
+        {
+            var tagType = distinctTagTypes[i];
+            var registration = _events.FindTagType(tagType)
+                               ?? throw new InvalidOperationException(
+                                   $"Tag type '{tagType.Name}' is not registered.");
+
+            sb.Append($" INNER JOIN [{schema}].[pc_event_tag_{registration.TableSuffix}] t{i} ON e.seq_id = t{i}.seq_id");
+        }
+
+        // WHERE clause
+        sb.Append(" WHERE (");
+        var paramIndex = 0;
+        await using var cmd = new SqlCommand();
+
+        for (var i = 0; i < conditions.Count; i++)
+        {
+            if (i > 0) sb.Append(" OR ");
+
+            var condition = conditions[i];
+            var tagIndex = distinctTagTypes.IndexOf(condition.TagType);
+            var registration = _events.FindTagType(condition.TagType)!;
+            var value = registration.ExtractValue(condition.TagValue);
+
+            sb.Append($"(t{tagIndex}.value = @p{paramIndex}");
+            cmd.Parameters.AddWithValue($"@p{paramIndex}", value);
+            paramIndex++;
+
+            if (condition.EventType != null)
+            {
+                sb.Append($" AND e.type = @p{paramIndex}");
+                var eventTypeName = _events.EventMappingFor(condition.EventType).EventTypeName;
+                cmd.Parameters.AddWithValue($"@p{paramIndex}", eventTypeName);
+                paramIndex++;
+            }
+
+            sb.Append(')');
+        }
+
+        sb.Append(") ORDER BY e.seq_id");
+        cmd.CommandText = sb.ToString();
+
+        var results = new List<IEvent>();
+        await using var dbReader = await _sessionBase.ExecuteReaderAsync(cmd, cancellation);
+        var reader = (SqlDataReader)dbReader;
+
+        while (await reader.ReadAsync(cancellation))
+        {
+            var seqId = reader.GetInt64(0);
+            var eventId = reader.GetGuid(1);
+            // stream_id at index 2
+            var eventVersion = reader.GetInt64(3);
+            var json = reader.GetString(4);
+            var typeName = reader.GetString(5);
+            var eventTimestamp = reader.GetDateTimeOffset(6);
+            var tenantId = reader.GetString(7);
+            var dotNetTypeName = reader.IsDBNull(8) ? null : reader.GetString(8);
+            var isArchived = reader.GetBoolean(9);
+
+            var resolvedType = _events.ResolveEventType(dotNetTypeName);
+            if (resolvedType == null) continue;
+
+            var data = _sessionBase.Serializer.FromJson(resolvedType, json);
+            var mapping = _events.EventMappingFor(resolvedType);
+            var @event = mapping.Wrap(data);
+
+            @event.Id = eventId;
+            @event.Sequence = seqId;
+            @event.Version = eventVersion;
+            @event.Timestamp = eventTimestamp;
+            @event.TenantId = tenantId;
+            @event.EventTypeName = typeName;
+            @event.DotNetTypeName = dotNetTypeName!;
+            @event.IsArchived = isArchived;
+
+            var metaIndex = 10;
+            if (eventOptions.EnableCorrelationId)
+            {
+                @event.CorrelationId = reader.IsDBNull(metaIndex) ? null : reader.GetString(metaIndex);
+                metaIndex++;
+            }
+            if (eventOptions.EnableCausationId)
+            {
+                @event.CausationId = reader.IsDBNull(metaIndex) ? null : reader.GetString(metaIndex);
+                metaIndex++;
+            }
+            if (eventOptions.EnableHeaders && !reader.IsDBNull(metaIndex))
+            {
+                var headersJson = reader.GetString(metaIndex);
+                @event.Headers = _sessionBase.Serializer.FromJson<Dictionary<string, object>>(headersJson);
+            }
+
+            results.Add(@event);
+        }
+
+        return results;
+    }
+
+    public async Task<T?> AggregateByTagsAsync<T>(EventTagQuery query,
+        CancellationToken cancellation = default) where T : class
+    {
+        var events = await QueryByTagsAsync(query, cancellation);
+        if (events.Count == 0) return default;
+
+        var aggregator = _sessionBase.Options.Projections.AggregatorFor<T>();
+        return await aggregator.BuildAsync(events, _sessionBase, default, cancellation);
+    }
+
+    public async Task<IEventBoundary<T>> FetchForWritingByTags<T>(EventTagQuery query,
+        CancellationToken cancellation = default) where T : class
+    {
+        var events = await QueryByTagsAsync(query, cancellation);
+        var lastSeenSequence = events.Count > 0 ? events.Max(e => e.Sequence) : 0;
+
+        T? aggregate = default;
+        if (events.Count > 0)
+        {
+            var aggregator = _sessionBase.Options.Projections.AggregatorFor<T>();
+            aggregate = await aggregator.BuildAsync(events, _sessionBase, default, cancellation);
+        }
+
+        // Register DCB assertion operation
+        _workTracker.Add(new AssertDcbConsistencyOperation(_events, query, lastSeenSequence));
+
+        return new EventBoundary<T>(_sessionBase, _events, aggregate, events, lastSeenSequence);
     }
 
     private IEvent[] WrapEvents(object[] events)

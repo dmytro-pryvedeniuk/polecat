@@ -55,6 +55,14 @@ public interface IEventStream<out T> where T : class
     void AppendMany(IEnumerable<object> events);
 
     /// <summary>
+    ///     If true, Polecat will enforce an optimistic concurrency check on this stream even if no
+    ///     events are appended at the time of calling SaveChangesAsync(). This is useful when you want
+    ///     to ensure the stream version has not advanced since it was fetched, even if the command
+    ///     handler decides not to emit any new events.
+    /// </summary>
+    bool AlwaysEnforceConsistency { get; set; }
+
+    /// <summary>
     ///     Try to advance the expected starting version for optimistic concurrency checks to the current version
     ///     so that you can reuse a stream object for multiple units of work.
     /// </summary>
@@ -110,6 +118,12 @@ internal class EventStream<T> : IEventStream<T> where T : class
     public long? CurrentVersion => _stream.ExpectedVersionOnServer == null
         ? null
         : _stream.ExpectedVersionOnServer.Value + _stream.Events.Count;
+
+    public bool AlwaysEnforceConsistency
+    {
+        get => _stream.AlwaysEnforceConsistency;
+        set => _stream.AlwaysEnforceConsistency = value;
+    }
 
     public IReadOnlyList<IEvent> Events => _stream.Events;
 

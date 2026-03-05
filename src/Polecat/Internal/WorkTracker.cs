@@ -13,7 +13,7 @@ internal class WorkTracker : IWorkTracker
     public IReadOnlyList<IStorageOperation> Operations => _operations;
     public IReadOnlyList<StreamAction> Streams => _streams;
 
-    public bool HasOutstandingWork() => _operations.Count > 0 || _streams.Count > 0;
+    public bool HasOutstandingWork() => _operations.Count > 0 || _streams.Any(x => x.Events.Count > 0 || x.AlwaysEnforceConsistency);
 
     public void Add(IStorageOperation operation)
     {
