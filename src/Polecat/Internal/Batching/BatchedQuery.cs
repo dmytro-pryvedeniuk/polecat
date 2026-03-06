@@ -1,5 +1,8 @@
+using JasperFx.Events.Tags;
 using Microsoft.Data.SqlClient;
 using Polecat.Batching;
+using Polecat.Events;
+using Polecat.Events.Dcb;
 using Polecat.Linq;
 using Weasel.SqlServer;
 
@@ -77,6 +80,17 @@ internal class BatchedQuery : IBatchedQuery
         var statement = provider.BuildStatement(queryable.Expression, _session.TenantId);
         var item = new QueryListBatchItem<T>(statement, _session.Serializer);
         AddItem(item);
+        return item.Result;
+    }
+
+    public Task<IEventBoundary<T>> FetchForWritingByTags<T>(EventTagQuery query) where T : class
+    {
+        if (_session is not DocumentSessionBase docSession)
+            throw new InvalidOperationException("FetchForWritingByTags requires a document session, not a query session.");
+
+        var eventGraph = docSession.Options.EventGraph;
+        var item = new FetchForWritingByTagsBatchItem<T>(eventGraph, query, docSession, _session.Serializer);
+        _items.Add(item);
         return item.Result;
     }
 

@@ -1,3 +1,6 @@
+using JasperFx.Events.Tags;
+using Polecat.Events.Dcb;
+
 namespace Polecat.Batching;
 
 /// <summary>
@@ -25,6 +28,12 @@ public interface IBatchedQuery
     ///     Execute a batch query plan (specification pattern).
     /// </summary>
     Task<T> QueryByPlan<T>(IBatchQueryPlan<T> plan);
+
+    /// <summary>
+    ///     Fetch events matching a tag query and aggregate them into type T with a DCB consistency boundary.
+    ///     At SaveChangesAsync time, will throw DcbConcurrencyException if new matching events were appended.
+    /// </summary>
+    Task<IEventBoundary<T>> FetchForWritingByTags<T>(EventTagQuery query) where T : class;
 
     Task Execute(CancellationToken token = default);
 }

@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Text;
 using JasperFx.Events;
 using JasperFx.Events.Tags;
@@ -5,6 +6,8 @@ using Microsoft.Data.SqlClient;
 using Polecat.Events.Dcb;
 using Polecat.Internal;
 using Polecat.Internal.Operations;
+using Polecat.Serialization;
+using Weasel.SqlServer;
 
 namespace Polecat.Events;
 
@@ -505,5 +508,113 @@ internal class EventOperations : QueryEventStore, IEventOperations
         }
 
         return wrapped;
+    }
+
+    /// <summary>
+    /// Build tag query SELECT columns and FROM/JOIN/WHERE SQL into a command builder.
+    /// Shared between direct queries and batch queries.
+    /// </summary>
+    internal static void WriteTagQuerySql(ICommandBuilder builder, EventGraph eventGraph, EventTagQuery query)
+    {
+        var conditions = query.Conditions;
+        var distinctTagTypes = conditions.Select(c => c.TagType).Distinct().ToList();
+        var schema = eventGraph.DatabaseSchemaName;
+        var eventOptions = eventGraph.EventOptions;
+
+        var selectColumns = "e.seq_id, e.id, e.stream_id, e.version, e.data, e.type, e.timestamp, e.tenant_id, e.dotnet_type, e.is_archived";
+        if (eventOptions.EnableCorrelationId) selectColumns += ", e.correlation_id";
+        if (eventOptions.EnableCausationId) selectColumns += ", e.causation_id";
+        if (eventOptions.EnableHeaders) selectColumns += ", e.headers";
+
+        builder.Append($"SELECT {selectColumns} FROM [{schema}].[pc_events] e");
+
+        for (var i = 0; i < distinctTagTypes.Count; i++)
+        {
+            var tagType = distinctTagTypes[i];
+            var registration = eventGraph.FindTagType(tagType)
+                               ?? throw new InvalidOperationException(
+                                   $"Tag type '{tagType.Name}' is not registered.");
+
+            builder.Append($" INNER JOIN [{schema}].[pc_event_tag_{registration.TableSuffix}] t{i} ON e.seq_id = t{i}.seq_id");
+        }
+
+        builder.Append(" WHERE (");
+        for (var i = 0; i < conditions.Count; i++)
+        {
+            if (i > 0) builder.Append(" OR ");
+
+            var condition = conditions[i];
+            var tagIndex = distinctTagTypes.IndexOf(condition.TagType);
+            var registration = eventGraph.FindTagType(condition.TagType)!;
+            var value = registration.ExtractValue(condition.TagValue);
+
+            builder.Append($"(t{tagIndex}.value = ");
+            builder.AppendParameter(value);
+
+            if (condition.EventType != null)
+            {
+                builder.Append(" AND e.type = ");
+                var eventTypeName = eventGraph.EventMappingFor(condition.EventType).EventTypeName;
+                builder.AppendParameter(eventTypeName);
+            }
+
+            builder.Append(")");
+        }
+
+        builder.Append(") ORDER BY e.seq_id");
+    }
+
+    /// <summary>
+    /// Read a single event from the current reader row. Column layout must match WriteTagQuerySql.
+    /// </summary>
+    internal static IEvent? ReadEventFromReader(DbDataReader reader, ISerializer serializer, EventGraph eventGraph)
+    {
+        var eventOptions = eventGraph.EventOptions;
+        var sqlReader = (SqlDataReader)reader;
+
+        var seqId = reader.GetInt64(0);
+        var eventId = reader.GetGuid(1);
+        var eventVersion = reader.GetInt64(3);
+        var json = reader.GetString(4);
+        var typeName = reader.GetString(5);
+        var eventTimestamp = sqlReader.GetDateTimeOffset(6);
+        var tenantId = reader.GetString(7);
+        var dotNetTypeName = reader.IsDBNull(8) ? null : reader.GetString(8);
+        var isArchived = reader.GetBoolean(9);
+
+        var resolvedType = eventGraph.ResolveEventType(dotNetTypeName);
+        if (resolvedType == null) return null;
+
+        var data = serializer.FromJson(resolvedType, json);
+        var mapping = eventGraph.EventMappingFor(resolvedType);
+        var @event = mapping.Wrap(data);
+
+        @event.Id = eventId;
+        @event.Sequence = seqId;
+        @event.Version = eventVersion;
+        @event.Timestamp = eventTimestamp;
+        @event.TenantId = tenantId;
+        @event.EventTypeName = typeName;
+        @event.DotNetTypeName = dotNetTypeName!;
+        @event.IsArchived = isArchived;
+
+        var metaIndex = 10;
+        if (eventOptions.EnableCorrelationId)
+        {
+            @event.CorrelationId = reader.IsDBNull(metaIndex) ? null : reader.GetString(metaIndex);
+            metaIndex++;
+        }
+        if (eventOptions.EnableCausationId)
+        {
+            @event.CausationId = reader.IsDBNull(metaIndex) ? null : reader.GetString(metaIndex);
+            metaIndex++;
+        }
+        if (eventOptions.EnableHeaders && !reader.IsDBNull(metaIndex))
+        {
+            var headersJson = reader.GetString(metaIndex);
+            @event.Headers = serializer.FromJson<Dictionary<string, object>>(headersJson);
+        }
+
+        return @event;
     }
 }
