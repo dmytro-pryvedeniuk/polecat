@@ -1,8 +1,10 @@
 using JasperFx.Events;
+using JasperFx.Events.Aggregation;
 using JasperFx.Events.Projections;
 using JasperFx.Events.Projections.Composite;
 using JasperFx.Events.Subscriptions;
 using Polecat.Events;
+using Polecat.Events.Projections;
 using Polecat.Projections.Flattened;
 using Polecat.Subscriptions;
 
@@ -112,6 +114,19 @@ public class PolecatProjectionOptions
     }
 
     /// <summary>
+    /// Find a registered natural key definition for the given aggregate type, if any.
+    /// </summary>
+    public NaturalKeyDefinition? FindNaturalKeyDefinition(Type aggregateType)
+    {
+        if (TryFindAggregate(aggregateType, out var projection))
+        {
+            return projection.NaturalKeyDefinition;
+        }
+
+        return null;
+    }
+
+    /// <summary>
     ///     Build the inline projection instances. Called once at DocumentStore construction.
     /// </summary>
     internal IInlineProjection<IDocumentSession>[] BuildInlineProjections()
@@ -127,10 +142,21 @@ public class PolecatProjectionOptions
             }
         }
 
-        _inlineProjections = All
+        var inlineList = All
             .Where(x => x.Lifecycle == ProjectionLifecycle.Inline)
             .Select(x => x.BuildForInline())
-            .ToArray();
+            .ToList();
+
+        // Add natural key inline projections for any aggregate projections with natural keys
+        foreach (var source in All)
+        {
+            if (source is IAggregateProjection { NaturalKeyDefinition: not null } aggProjection)
+            {
+                inlineList.Add(new NaturalKeyProjection(aggProjection.NaturalKeyDefinition, _events));
+            }
+        }
+
+        _inlineProjections = inlineList.ToArray();
 
         return _inlineProjections;
     }

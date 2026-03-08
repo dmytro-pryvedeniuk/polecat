@@ -1,3 +1,4 @@
+using JasperFx.Events;
 using Weasel.Core;
 using Weasel.Core.Migrations;
 using Weasel.SqlServer;
@@ -11,11 +12,13 @@ namespace Polecat.Events.Schema;
 internal class EventStoreFeatureSchema : FeatureSchemaBase
 {
     private readonly EventGraph _events;
+    private readonly IReadOnlyList<NaturalKeyDefinition> _naturalKeys;
 
-    public EventStoreFeatureSchema(EventGraph events)
+    public EventStoreFeatureSchema(EventGraph events, IReadOnlyList<NaturalKeyDefinition> naturalKeys)
         : base("EventStore", new SqlServerMigrator())
     {
         _events = events;
+        _naturalKeys = naturalKeys;
     }
 
     public override Type StorageType => typeof(EventStoreFeatureSchema);
@@ -31,6 +34,12 @@ internal class EventStoreFeatureSchema : FeatureSchemaBase
         foreach (var tagRegistration in _events.TagTypes)
         {
             yield return _events.BuildEventTagTable(tagRegistration);
+        }
+
+        // Natural key tables
+        foreach (var naturalKey in _naturalKeys)
+        {
+            yield return new NaturalKeyTable(_events, naturalKey);
         }
     }
 }

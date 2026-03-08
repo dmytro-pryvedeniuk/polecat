@@ -319,15 +319,44 @@ public class AdvancedOperations
     }
 
     /// <summary>
-    ///     Delete all rows from event store tables (pc_events, pc_streams, pc_event_progression).
+    ///     Delete all rows from event store tables (pc_events, pc_streams, pc_event_progression)
+    ///     and all natural key tables (pc_natural_key_*).
     /// </summary>
     public async Task CleanAllEventDataAsync(CancellationToken token = default)
     {
         var events = _store.Events;
+        var schema = events.DatabaseSchemaName;
         await _resilience.ExecuteAsync(async (_, ct) =>
         {
             await using var conn = new SqlConnection(_store.Options.ConnectionString);
             await conn.OpenAsync(ct);
+
+            // Delete natural key tables first (they reference streams)
+            await using (var findCmd = conn.CreateCommand())
+            {
+                findCmd.CommandText = $"""
+                    SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+                    WHERE TABLE_SCHEMA = @schema AND TABLE_NAME LIKE 'pc_natural_key_%'
+                    ORDER BY TABLE_NAME;
+                    """;
+                findCmd.Parameters.AddWithValue("@schema", schema);
+
+                var nkTables = new List<string>();
+                await using (var reader = await findCmd.ExecuteReaderAsync(ct))
+                {
+                    while (await reader.ReadAsync(ct))
+                    {
+                        nkTables.Add(reader.GetString(0));
+                    }
+                }
+
+                foreach (var table in nkTables)
+                {
+                    await using var deleteCmd = conn.CreateCommand();
+                    deleteCmd.CommandText = $"DELETE FROM [{schema}].[{table}];";
+                    await deleteCmd.ExecuteNonQueryAsync(ct);
+                }
+            }
 
             // Delete in FK-safe order: events first, then streams, then progression
             await using (var cmd = conn.CreateCommand())

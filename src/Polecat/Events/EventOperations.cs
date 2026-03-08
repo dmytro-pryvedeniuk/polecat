@@ -4,6 +4,7 @@ using JasperFx.Events;
 using JasperFx.Events.Tags;
 using Microsoft.Data.SqlClient;
 using Polecat.Events.Dcb;
+using Polecat.Events.Fetching;
 using Polecat.Internal;
 using Polecat.Internal.Operations;
 using Polecat.Serialization;
@@ -347,6 +348,68 @@ internal class EventOperations : QueryEventStore, IEventOperations
         {
             return new EventStream<T>(_sessionBase, _events, (string)streamId, aggregate, cancellation, action);
         }
+    }
+
+    public async Task<IEventStream<T>> FetchForWriting<T, TId>(TId id, CancellationToken cancellation = default)
+        where T : class, new() where TId : notnull
+    {
+        var naturalKey = FindNaturalKeyDefinition<T>();
+        return await NaturalKeyFetchPlanner.FetchForWritingByNaturalKey<T, TId>(
+            _sessionBase, _events, _workTracker, naturalKey, id, _tenantId, cancellation);
+    }
+
+    public async Task<IEventStream<T>> FetchForExclusiveWriting<T, TId>(TId id, CancellationToken cancellation = default)
+        where T : class, new() where TId : notnull
+    {
+        // FetchForWritingByNaturalKey already uses UPDLOCK, HOLDLOCK for exclusive locking
+        var naturalKey = FindNaturalKeyDefinition<T>();
+        return await NaturalKeyFetchPlanner.FetchForWritingByNaturalKey<T, TId>(
+            _sessionBase, _events, _workTracker, naturalKey, id, _tenantId, cancellation);
+    }
+
+    public async ValueTask<T?> FetchLatest<T, TId>(TId id, CancellationToken cancellation = default)
+        where T : class, new() where TId : notnull
+    {
+        var naturalKey = FindNaturalKeyDefinition<T>();
+        var unwrapped = naturalKey.Unwrap(id);
+        if (unwrapped == null) return default;
+
+        var isGuidStream = _events.StreamIdentity == StreamIdentity.AsGuid;
+        var schema = _events.DatabaseSchemaName;
+        var tableName = $"pc_natural_key_{naturalKey.AggregateType.Name.ToLowerInvariant()}";
+        var streamColumn = isGuidStream ? "stream_id" : "stream_key";
+
+        // Look up stream id from natural key table (read-only, no locking)
+        await using var cmd = new SqlCommand();
+        cmd.CommandText = $"""
+            SELECT nk.{streamColumn}
+            FROM [{schema}].[{tableName}] nk
+            WHERE nk.natural_key_value = @naturalKey AND nk.is_archived = 0;
+            """;
+        cmd.Parameters.AddWithValue("@naturalKey", unwrapped);
+
+        var result = await _sessionBase.ExecuteScalarAsync(cmd, cancellation);
+        if (result == null || result == DBNull.Value) return default;
+
+        // Delegate to existing FetchLatest with the resolved stream id
+        if (isGuidStream)
+        {
+            return await FetchLatest<T>((Guid)result, cancellation);
+        }
+        else
+        {
+            return await FetchLatest<T>((string)result, cancellation);
+        }
+    }
+
+    private NaturalKeyDefinition FindNaturalKeyDefinition<T>()
+    {
+        var definition = _sessionBase.Options.Projections.FindNaturalKeyDefinition(typeof(T));
+        if (definition != null) return definition;
+
+        throw new InvalidOperationException(
+            $"No natural key definition found for aggregate type '{typeof(T).Name}'. " +
+            "Configure a natural key via NaturalKey() in a SingleStreamProjection or Snapshot registration.");
     }
 
     public IEvent BuildEvent(object data) => _events.BuildEvent(data);

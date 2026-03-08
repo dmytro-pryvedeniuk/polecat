@@ -159,4 +159,23 @@ public interface IEventOperations : IQueryEventStore
     ///     Build an IEvent wrapper for raw event data. Useful for setting tags before appending.
     /// </summary>
     IEvent BuildEvent(object data);
+
+    /// <summary>
+    ///     Fetch the aggregate state for writing by a natural key or any registered identifier type.
+    /// </summary>
+    Task<IEventStream<T>> FetchForWriting<T, TId>(TId id, CancellationToken cancellation = default)
+        where T : class, new() where TId : notnull;
+
+    /// <summary>
+    ///     Fetch the aggregate state by natural key for exclusive writing with row-level locking.
+    /// </summary>
+    Task<IEventStream<T>> FetchForExclusiveWriting<T, TId>(TId id, CancellationToken cancellation = default)
+        where T : class, new() where TId : notnull;
+
+    /// <summary>
+    ///     Fetch the projected aggregate T by a natural key or any registered identifier type.
+    ///     This is a lightweight, read-only version of FetchForWriting.
+    /// </summary>
+    ValueTask<T?> FetchLatest<T, TId>(TId id, CancellationToken cancellation = default)
+        where T : class, new() where TId : notnull;
 }

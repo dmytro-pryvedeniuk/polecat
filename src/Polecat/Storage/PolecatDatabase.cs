@@ -1,6 +1,7 @@
 using JasperFx.Core.Reflection;
 using JasperFx.Descriptors;
 using JasperFx.Events;
+using JasperFx.Events.Aggregation;
 using JasperFx.Events.Daemon;
 using JasperFx.Events.Daemon.HighWater;
 using JasperFx.Events.Projections;
@@ -67,7 +68,13 @@ public class PolecatDatabase : DatabaseBase<SqlConnection>, IEventDatabase
 
     public override IFeatureSchema[] BuildFeatureSchemas()
     {
-        return [new EventStoreFeatureSchema(_events)];
+        var naturalKeys = _options.Projections.All
+            .OfType<IAggregateProjection>()
+            .Where(p => p.NaturalKeyDefinition != null)
+            .Select(p => p.NaturalKeyDefinition!)
+            .ToList();
+
+        return [new EventStoreFeatureSchema(_events, naturalKeys)];
     }
 
     public override DatabaseDescriptor Describe()
