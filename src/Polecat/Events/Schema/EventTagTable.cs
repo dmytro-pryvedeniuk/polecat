@@ -10,7 +10,7 @@ namespace Polecat.Events.Schema;
 /// </summary>
 internal class EventTagTable : Table
 {
-    public EventTagTable(EventGraph events, TagTypeRegistration registration)
+    public EventTagTable(EventGraph events, ITagTypeRegistration registration)
         : base(new SqlServerObjectName(events.DatabaseSchemaName, $"pc_event_tag_{registration.TableSuffix}"))
     {
         var sqlType = SqlServerTypeFor(registration.SimpleType);

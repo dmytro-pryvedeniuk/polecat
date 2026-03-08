@@ -284,7 +284,7 @@ public class EventStoreOptions
     ///     Register a tag type for Dynamic Consistency Boundary (DCB) support.
     ///     Creates a tag table with an auto-generated suffix.
     /// </summary>
-    public TagTypeRegistration RegisterTagType<TTag>()
+    public ITagTypeRegistration RegisterTagType<TTag>() where TTag : notnull
     {
         return EventGraph!.RegisterTagType<TTag>();
     }
@@ -292,7 +292,7 @@ public class EventStoreOptions
     /// <summary>
     ///     Register a tag type with an explicit table suffix for DCB support.
     /// </summary>
-    public TagTypeRegistration RegisterTagType<TTag>(string tableSuffix)
+    public ITagTypeRegistration RegisterTagType<TTag>(string tableSuffix) where TTag : notnull
     {
         return EventGraph!.RegisterTagType<TTag>(tableSuffix);
     }

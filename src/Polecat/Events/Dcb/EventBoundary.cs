@@ -74,7 +74,7 @@ internal class EventBoundary<T> : IEventBoundary<T> where T : class
             var registration = _events.FindTagType(tag.TagType);
             if (registration?.AggregateType == null) continue;
 
-            var streamId = tag.Value;
+            var streamId = registration.ExtractValue(tag.Value);
             if (streamId is Guid guidId)
             {
                 if (!_session.WorkTracker.TryFindStream(guidId, out stream))

@@ -695,7 +695,7 @@ internal abstract class DocumentSessionBase : QuerySession, IDocumentSession
                 var valueParam = $"@tag_value_{tagIndex}";
                 sb.AppendLine($"IF NOT EXISTS (SELECT 1 FROM [{schema}].[pc_event_tag_{registration.TableSuffix}] WHERE value = {valueParam} AND seq_id = @seq_id)");
                 sb.AppendLine($"INSERT INTO [{schema}].[pc_event_tag_{registration.TableSuffix}] (value, seq_id) VALUES ({valueParam}, @seq_id);");
-                cmd.Parameters.AddWithValue(valueParam, tag.Value);
+                cmd.Parameters.AddWithValue(valueParam, registration.ExtractValue(tag.Value));
                 tagIndex++;
             }
 

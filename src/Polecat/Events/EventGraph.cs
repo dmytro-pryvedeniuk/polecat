@@ -20,7 +20,7 @@ public class EventGraph : EventRegistry, IAggregationSourceFactory<IQuerySession
     private readonly StoreOptions _options;
     private readonly ConcurrentDictionary<Type, PolecatEventType> _eventTypes = new();
     private readonly ConcurrentDictionary<string, Type> _aggregateTypes = new();
-    private readonly List<TagTypeRegistration> _tagTypes = new();
+    private readonly List<ITagTypeRegistration> _tagTypes = new();
 
     internal EventGraph(StoreOptions options)
     {
@@ -151,32 +151,32 @@ public class EventGraph : EventRegistry, IAggregationSourceFactory<IQuerySession
         return new EventProgressionTable(DatabaseSchemaName);
     }
 
-    public TagTypeRegistration RegisterTagType<TTag>()
+    public ITagTypeRegistration RegisterTagType<TTag>() where TTag : notnull
     {
         var existing = _tagTypes.FirstOrDefault(t => t.TagType == typeof(TTag));
         if (existing != null) return existing;
-        var registration = new TagTypeRegistration(typeof(TTag));
+        var registration = TagTypeRegistration.Create<TTag>();
         _tagTypes.Add(registration);
         return registration;
     }
 
-    public TagTypeRegistration RegisterTagType<TTag>(string tableSuffix)
+    public ITagTypeRegistration RegisterTagType<TTag>(string tableSuffix) where TTag : notnull
     {
         var existing = _tagTypes.FirstOrDefault(t => t.TagType == typeof(TTag));
         if (existing != null) return existing;
-        var registration = new TagTypeRegistration(typeof(TTag), tableSuffix);
+        var registration = TagTypeRegistration.Create<TTag>(tableSuffix);
         _tagTypes.Add(registration);
         return registration;
     }
 
-    public IReadOnlyList<TagTypeRegistration> TagTypes => _tagTypes;
+    public IReadOnlyList<ITagTypeRegistration> TagTypes => _tagTypes;
 
-    public TagTypeRegistration? FindTagType(Type tagType)
+    public ITagTypeRegistration? FindTagType(Type tagType)
     {
         return _tagTypes.FirstOrDefault(t => t.TagType == tagType);
     }
 
-    internal EventTagTable BuildEventTagTable(TagTypeRegistration registration)
+    internal EventTagTable BuildEventTagTable(ITagTypeRegistration registration)
     {
         return new EventTagTable(this, registration);
     }
