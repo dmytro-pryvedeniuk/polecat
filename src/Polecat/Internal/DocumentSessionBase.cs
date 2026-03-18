@@ -231,6 +231,22 @@ internal abstract class DocumentSessionBase : QuerySession, IDocumentSession
         _workTracker.Add(op);
     }
 
+    private Dictionary<string, NestedTenantSession>? _byTenant;
+
+    public ITenantOperations ForTenant(string tenantId)
+    {
+        _byTenant ??= new Dictionary<string, NestedTenantSession>();
+
+        if (_byTenant.TryGetValue(tenantId, out var tenantSession))
+        {
+            return tenantSession;
+        }
+
+        tenantSession = new NestedTenantSession(this, tenantId);
+        _byTenant[tenantId] = tenantSession;
+        return tenantSession;
+    }
+
     public void UpdateExpectedVersion<T>(T document, Guid version) where T : notnull
     {
         if (document is IVersioned versioned)
