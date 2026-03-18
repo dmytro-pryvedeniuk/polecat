@@ -278,6 +278,101 @@ internal class EventOperations : QueryEventStore, IEventOperations
         await _sessionBase.SaveChangesAsync(cancellation);
     }
 
+    public async Task AppendOptimistic(Guid streamId, CancellationToken token, params object[] events)
+    {
+        var version = await ReadVersionFromExistingStream(streamId, false, token);
+        var action = Append(streamId, events);
+        action.ExpectedVersionOnServer = version;
+    }
+
+    public Task AppendOptimistic(Guid streamId, params object[] events)
+        => AppendOptimistic(streamId, CancellationToken.None, events);
+
+    public async Task AppendOptimistic(string streamKey, CancellationToken token, params object[] events)
+    {
+        var version = await ReadVersionFromExistingStream(streamKey, false, token);
+        var action = Append(streamKey, events);
+        action.ExpectedVersionOnServer = version;
+    }
+
+    public Task AppendOptimistic(string streamKey, params object[] events)
+        => AppendOptimistic(streamKey, CancellationToken.None, events);
+
+    public async Task AppendExclusive(Guid streamId, CancellationToken token, params object[] events)
+    {
+        try
+        {
+            await _sessionBase.BeginTransactionAsync(token);
+            var version = await ReadVersionFromExistingStream(streamId, true, token);
+            var action = Append(streamId, events);
+            action.ExpectedVersionOnServer = version;
+        }
+        catch (Exception e) when (IsLockFailure(e))
+        {
+            throw new Exceptions.StreamLockedException(streamId, e.InnerException);
+        }
+    }
+
+    public Task AppendExclusive(Guid streamId, params object[] events)
+        => AppendExclusive(streamId, CancellationToken.None, events);
+
+    public async Task AppendExclusive(string streamKey, CancellationToken token, params object[] events)
+    {
+        try
+        {
+            await _sessionBase.BeginTransactionAsync(token);
+            var version = await ReadVersionFromExistingStream(streamKey, true, token);
+            var action = Append(streamKey, events);
+            action.ExpectedVersionOnServer = version;
+        }
+        catch (Exception e) when (IsLockFailure(e))
+        {
+            throw new Exceptions.StreamLockedException(streamKey, e.InnerException);
+        }
+    }
+
+    public Task AppendExclusive(string streamKey, params object[] events)
+        => AppendExclusive(streamKey, CancellationToken.None, events);
+
+    private async Task<long> ReadVersionFromExistingStream(object streamId, bool forUpdate, CancellationToken token)
+    {
+        var lockHint = forUpdate ? " WITH (UPDLOCK, HOLDLOCK)" : "";
+        await using var cmd = new SqlCommand();
+        cmd.CommandText = $"""
+            SELECT version FROM {_events.StreamsTableName}{lockHint}
+            WHERE id = @id AND tenant_id = @tenant_id;
+            """;
+        cmd.Parameters.AddWithValue("@id", streamId);
+        cmd.Parameters.AddWithValue("@tenant_id", _tenantId);
+
+        long version = 0;
+        try
+        {
+            var result = await _sessionBase.ExecuteScalarAsync(cmd, token);
+            if (result != null && result != DBNull.Value)
+            {
+                version = (long)result;
+            }
+        }
+        catch (Exception e) when (IsLockFailure(e))
+        {
+            throw new Exceptions.StreamLockedException(streamId, e.InnerException);
+        }
+
+        if (version == 0)
+        {
+            throw new Exceptions.NonExistentStreamException(streamId);
+        }
+
+        return version;
+    }
+
+    private static bool IsLockFailure(Exception e)
+    {
+        // SQL Server lock timeout or deadlock errors
+        return e.InnerException is SqlException { Number: 1222 or 1205 };
+    }
+
     public void ArchiveStream(Guid streamId)
     {
         _workTracker.Add(new ArchiveStreamOperation(_events, streamId, _tenantId));
