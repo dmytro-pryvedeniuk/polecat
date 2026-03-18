@@ -112,6 +112,46 @@ public interface IEventOperations : IQueryEventStore
     Task WriteToAggregate<T>(string key, Func<IEventStream<T>, Task> writing, CancellationToken cancellation = default) where T : class, new();
 
     /// <summary>
+    ///     Fetch the aggregate at a specific version, apply events via callback, and save changes in one step.
+    /// </summary>
+    Task WriteToAggregate<T>(Guid id, int initialVersion, Action<IEventStream<T>> writing, CancellationToken cancellation = default) where T : class, new();
+
+    /// <summary>
+    ///     Fetch the aggregate at a specific version, apply events via async callback, and save changes in one step.
+    /// </summary>
+    Task WriteToAggregate<T>(Guid id, int initialVersion, Func<IEventStream<T>, Task> writing, CancellationToken cancellation = default) where T : class, new();
+
+    /// <summary>
+    ///     Fetch the aggregate at a specific version, apply events via callback, and save changes in one step.
+    /// </summary>
+    Task WriteToAggregate<T>(string key, int initialVersion, Action<IEventStream<T>> writing, CancellationToken cancellation = default) where T : class, new();
+
+    /// <summary>
+    ///     Fetch the aggregate at a specific version, apply events via async callback, and save changes in one step.
+    /// </summary>
+    Task WriteToAggregate<T>(string key, int initialVersion, Func<IEventStream<T>, Task> writing, CancellationToken cancellation = default) where T : class, new();
+
+    /// <summary>
+    ///     Fetch the aggregate with an exclusive lock, apply events via callback, and save changes in one step.
+    /// </summary>
+    Task WriteExclusivelyToAggregate<T>(Guid id, Action<IEventStream<T>> writing, CancellationToken cancellation = default) where T : class, new();
+
+    /// <summary>
+    ///     Fetch the aggregate with an exclusive lock, apply events via callback, and save changes in one step.
+    /// </summary>
+    Task WriteExclusivelyToAggregate<T>(string key, Action<IEventStream<T>> writing, CancellationToken cancellation = default) where T : class, new();
+
+    /// <summary>
+    ///     Fetch the aggregate with an exclusive lock, apply events via async callback, and save changes in one step.
+    /// </summary>
+    Task WriteExclusivelyToAggregate<T>(Guid id, Func<IEventStream<T>, Task> writing, CancellationToken cancellation = default) where T : class, new();
+
+    /// <summary>
+    ///     Fetch the aggregate with an exclusive lock, apply events via async callback, and save changes in one step.
+    /// </summary>
+    Task WriteExclusivelyToAggregate<T>(string key, Func<IEventStream<T>, Task> writing, CancellationToken cancellation = default) where T : class, new();
+
+    /// <summary>
     ///     Mark a stream and all its events as archived by Guid id.
     /// </summary>
     void ArchiveStream(Guid streamId);

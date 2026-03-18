@@ -214,6 +214,70 @@ internal class EventOperations : QueryEventStore, IEventOperations
         await _sessionBase.SaveChangesAsync(cancellation);
     }
 
+    public async Task WriteToAggregate<T>(Guid id, int initialVersion, Action<IEventStream<T>> writing, CancellationToken cancellation = default)
+        where T : class, new()
+    {
+        var stream = await FetchForWriting<T>(id, initialVersion, cancellation);
+        writing(stream);
+        await _sessionBase.SaveChangesAsync(cancellation);
+    }
+
+    public async Task WriteToAggregate<T>(Guid id, int initialVersion, Func<IEventStream<T>, Task> writing, CancellationToken cancellation = default)
+        where T : class, new()
+    {
+        var stream = await FetchForWriting<T>(id, initialVersion, cancellation);
+        await writing(stream);
+        await _sessionBase.SaveChangesAsync(cancellation);
+    }
+
+    public async Task WriteToAggregate<T>(string key, int initialVersion, Action<IEventStream<T>> writing, CancellationToken cancellation = default)
+        where T : class, new()
+    {
+        var stream = await FetchForWriting<T>(key, initialVersion, cancellation);
+        writing(stream);
+        await _sessionBase.SaveChangesAsync(cancellation);
+    }
+
+    public async Task WriteToAggregate<T>(string key, int initialVersion, Func<IEventStream<T>, Task> writing, CancellationToken cancellation = default)
+        where T : class, new()
+    {
+        var stream = await FetchForWriting<T>(key, initialVersion, cancellation);
+        await writing(stream);
+        await _sessionBase.SaveChangesAsync(cancellation);
+    }
+
+    public async Task WriteExclusivelyToAggregate<T>(Guid id, Action<IEventStream<T>> writing, CancellationToken cancellation = default)
+        where T : class, new()
+    {
+        var stream = await FetchForExclusiveWriting<T>(id, cancellation);
+        writing(stream);
+        await _sessionBase.SaveChangesAsync(cancellation);
+    }
+
+    public async Task WriteExclusivelyToAggregate<T>(string key, Action<IEventStream<T>> writing, CancellationToken cancellation = default)
+        where T : class, new()
+    {
+        var stream = await FetchForExclusiveWriting<T>(key, cancellation);
+        writing(stream);
+        await _sessionBase.SaveChangesAsync(cancellation);
+    }
+
+    public async Task WriteExclusivelyToAggregate<T>(Guid id, Func<IEventStream<T>, Task> writing, CancellationToken cancellation = default)
+        where T : class, new()
+    {
+        var stream = await FetchForExclusiveWriting<T>(id, cancellation);
+        await writing(stream);
+        await _sessionBase.SaveChangesAsync(cancellation);
+    }
+
+    public async Task WriteExclusivelyToAggregate<T>(string key, Func<IEventStream<T>, Task> writing, CancellationToken cancellation = default)
+        where T : class, new()
+    {
+        var stream = await FetchForExclusiveWriting<T>(key, cancellation);
+        await writing(stream);
+        await _sessionBase.SaveChangesAsync(cancellation);
+    }
+
     public void ArchiveStream(Guid streamId)
     {
         _workTracker.Add(new ArchiveStreamOperation(_events, streamId, _tenantId));
