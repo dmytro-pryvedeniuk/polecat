@@ -102,6 +102,16 @@ internal class DocumentProviderRegistry
                     mapping.Indexes.Add(index);
                 }
             }
+
+            // Apply foreign keys
+            var fkField = exprType.GetField("ForeignKeys", BindingFlags.NonPublic | BindingFlags.Instance);
+            if (fkField?.GetValue(expr) is IEnumerable<Storage.DocumentForeignKey> foreignKeys)
+            {
+                foreach (var fk in foreignKeys)
+                {
+                    mapping.ForeignKeys.Add(fk);
+                }
+            }
         }
     }
 

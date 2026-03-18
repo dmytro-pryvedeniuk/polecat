@@ -130,6 +130,11 @@ internal class DocumentMapping
     public List<DocumentIndex> Indexes { get; } = new();
 
     /// <summary>
+    ///     Foreign key constraints configured for this document type.
+    /// </summary>
+    public List<DocumentForeignKey> ForeignKeys { get; } = new();
+
+    /// <summary>
     ///     The alias used in the doc_type discriminator column for the base type.
     /// </summary>
     public string Alias { get; set; } = "base";

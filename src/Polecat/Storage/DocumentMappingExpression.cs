@@ -11,6 +11,7 @@ public class DocumentMappingExpression<T>
     internal readonly Type DocumentType = typeof(T);
     internal readonly List<(Type SubClass, string? Alias)> SubClasses = new();
     internal readonly List<DocumentIndex> Indexes = new();
+    internal readonly List<DocumentForeignKey> ForeignKeys = new();
 
     /// <summary>
     ///     Register a subclass of T for document hierarchy (single-table inheritance).
@@ -80,6 +81,28 @@ public class DocumentMappingExpression<T>
     public DocumentMappingExpression<T> AddIndex(DocumentIndex index)
     {
         Indexes.Add(index);
+        return this;
+    }
+
+    /// <summary>
+    ///     Add a foreign key from a document property to another document type's table.
+    /// </summary>
+    public DocumentMappingExpression<T> ForeignKey<TReference>(Expression<Func<T, object?>> expression,
+        Action<DocumentForeignKey>? configure = null)
+    {
+        var path = DocumentForeignKey.ResolveJsonPath(expression);
+        var fk = new DocumentForeignKey(path, typeof(TReference));
+        configure?.Invoke(fk);
+        ForeignKeys.Add(fk);
+        return this;
+    }
+
+    /// <summary>
+    ///     Add a foreign key with explicit configuration.
+    /// </summary>
+    public DocumentMappingExpression<T> AddForeignKey(DocumentForeignKey foreignKey)
+    {
+        ForeignKeys.Add(foreignKey);
         return this;
     }
 }
