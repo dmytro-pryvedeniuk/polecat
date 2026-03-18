@@ -1,3 +1,5 @@
+using System.Linq.Expressions;
+
 namespace Polecat.Storage;
 
 /// <summary>
@@ -8,6 +10,7 @@ public class DocumentMappingExpression<T>
 {
     internal readonly Type DocumentType = typeof(T);
     internal readonly List<(Type SubClass, string? Alias)> SubClasses = new();
+    internal readonly List<DocumentIndex> Indexes = new();
 
     /// <summary>
     ///     Register a subclass of T for document hierarchy (single-table inheritance).
@@ -41,6 +44,42 @@ public class DocumentMappingExpression<T>
                 SubClasses.Add((type, null));
             }
         }
+        return this;
+    }
+
+    /// <summary>
+    ///     Add a computed index on one or more document properties.
+    ///     Properties are extracted via JSON_VALUE from the data column.
+    /// </summary>
+    public DocumentMappingExpression<T> Index(Expression<Func<T, object?>> expression,
+        Action<DocumentIndex>? configure = null)
+    {
+        var paths = DocumentIndex.ResolveJsonPaths(expression);
+        var index = new DocumentIndex(paths);
+        configure?.Invoke(index);
+        Indexes.Add(index);
+        return this;
+    }
+
+    /// <summary>
+    ///     Add a unique index on one or more document properties.
+    /// </summary>
+    public DocumentMappingExpression<T> UniqueIndex(Expression<Func<T, object?>> expression,
+        Action<DocumentIndex>? configure = null)
+    {
+        var paths = DocumentIndex.ResolveJsonPaths(expression);
+        var index = new DocumentIndex(paths) { IsUnique = true };
+        configure?.Invoke(index);
+        Indexes.Add(index);
+        return this;
+    }
+
+    /// <summary>
+    ///     Add a custom index with explicit configuration.
+    /// </summary>
+    public DocumentMappingExpression<T> AddIndex(DocumentIndex index)
+    {
+        Indexes.Add(index);
         return this;
     }
 }

@@ -63,6 +63,19 @@ internal class DocumentTableEnsurer
             cmd.CommandText = ddl;
             await cmd.ExecuteNonQueryAsync(token);
 
+            // Create custom indexes (computed columns + index)
+            // Each statement executed separately so computed columns are visible
+            // before filtered indexes reference them
+            foreach (var index in provider.Mapping.Indexes)
+            {
+                foreach (var statement in index.ToDdlStatements(provider.Mapping))
+                {
+                    await using var indexCmd = conn.CreateCommand();
+                    indexCmd.CommandText = statement;
+                    await indexCmd.ExecuteNonQueryAsync(token);
+                }
+            }
+
             _ensured.TryAdd(docType, true);
         }
         finally
@@ -164,4 +177,5 @@ internal class DocumentTableEnsurer
                 );
             END";
     }
+
 }

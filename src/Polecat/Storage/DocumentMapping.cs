@@ -125,6 +125,11 @@ internal class DocumentMapping
     public List<SubClassMapping> SubClasses { get; } = new();
 
     /// <summary>
+    ///     Custom indexes configured for this document type.
+    /// </summary>
+    public List<DocumentIndex> Indexes { get; } = new();
+
+    /// <summary>
     ///     The alias used in the doc_type discriminator column for the base type.
     /// </summary>
     public string Alias { get; set; } = "base";

@@ -84,12 +84,23 @@ internal class DocumentProviderRegistry
 
             // Found the expression for this mapping — apply sub-classes
             var subClassesField = exprType.GetField("SubClasses", BindingFlags.NonPublic | BindingFlags.Instance);
-            if (subClassesField?.GetValue(expr) is not IEnumerable<(Type SubClass, string? Alias)> subClasses) continue;
-
-            foreach (var (subClass, alias) in subClasses)
+            if (subClassesField?.GetValue(expr) is IEnumerable<(Type SubClass, string? Alias)> subClasses)
             {
-                mapping.AddSubClass(subClass, alias);
-                _subClassToParent.TryAdd(subClass, mapping.DocumentType);
+                foreach (var (subClass, alias) in subClasses)
+                {
+                    mapping.AddSubClass(subClass, alias);
+                    _subClassToParent.TryAdd(subClass, mapping.DocumentType);
+                }
+            }
+
+            // Apply indexes
+            var indexesField = exprType.GetField("Indexes", BindingFlags.NonPublic | BindingFlags.Instance);
+            if (indexesField?.GetValue(expr) is IEnumerable<Storage.DocumentIndex> indexes)
+            {
+                foreach (var index in indexes)
+                {
+                    mapping.Indexes.Add(index);
+                }
             }
         }
     }
