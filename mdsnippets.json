@@ -1,0 +1,7 @@
+{
+    "Convention": "InPlaceOverwrite",
+    "LinkFormat": "GitHub",
+    "UrlPrefix": "https://github.com/JasperFx/polecat/blob/main",
+    "ExcludeSnippetDirectories": ["./src/Polecat", "./src/Polecat.AspNetCore", "./src/Polecat.CodeGeneration", "./src/Polecat.EntityFrameworkCore", "DcbLoadTest"],
+    "TreatMissingAsWarning": false
+}
