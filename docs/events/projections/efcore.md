@@ -79,6 +79,67 @@ public class AuditEfProjection : EfCoreEventProjection
 }
 ```
 
+## Schema Migration with AddEntityTablesFromDbContext
+
+By default, EF Core entity tables must be created separately (e.g., via `dotnet ef database update` or `Database.GenerateCreateScript()`). If you want Polecat's Weasel migration pipeline to manage your EF Core entity tables alongside Polecat's own schema objects, use `AddEntityTablesFromDbContext`:
+
+```cs
+var store = DocumentStore.For(opts =>
+{
+    opts.ConnectionString = connectionString;
+    opts.AddEntityTablesFromDbContext<OrderDbContext>();
+});
+```
+
+This reads the entity model from your `DbContext` and registers each table with Polecat's Weasel migration system. When `ApplyAllConfiguredChangesToDatabaseAsync()` runs, EF Core entity tables will be created and migrated automatically.
+
+### Schema Handling
+
+`AddEntityTablesFromDbContext` respects explicit schema configuration in your EF Core model:
+
+- **Entities with an explicit schema** (via `HasDefaultSchema()` or `ToTable("name", "schema")`) will retain their configured schema
+- **Entities without an explicit schema** will use the SQL Server default schema (`dbo`)
+
+```cs
+// This DbContext places entities in a custom schema
+public class MyDbContext : DbContext
+{
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.HasDefaultSchema("my_schema");
+        modelBuilder.Entity<Order>().ToTable("orders");
+    }
+}
+
+var store = DocumentStore.For(opts =>
+{
+    opts.ConnectionString = connectionString;
+    opts.DatabaseSchemaName = "polecat_schema";
+
+    // The "orders" table will be created in "my_schema", NOT "polecat_schema"
+    opts.AddEntityTablesFromDbContext<MyDbContext>();
+});
+```
+
+### Combining with Projections
+
+You can use `AddEntityTablesFromDbContext` alongside EF Core projections for a fully integrated setup:
+
+```cs
+var store = DocumentStore.For(opts =>
+{
+    opts.ConnectionString = connectionString;
+    opts.Projections.Add<OrderEfProjection, Order, OrderDbContext>(
+        opts, new OrderEfProjection(), ProjectionLifecycle.Inline);
+
+    // Also register the entity tables for Weasel migration
+    opts.AddEntityTablesFromDbContext<OrderDbContext>();
+});
+
+// This single call now creates both Polecat event tables and EF Core entity tables
+await store.Database.ApplyAllConfiguredChangesToDatabaseAsync();
+```
+
 ## How It Works
 
 1. Polecat creates a placeholder `SqlConnection` and `DbContext` for each projection batch

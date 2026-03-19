@@ -74,7 +74,17 @@ public class PolecatDatabase : DatabaseBase<SqlConnection>, IEventDatabase
             .Select(p => p.NaturalKeyDefinition!)
             .ToList();
 
-        return [new EventStoreFeatureSchema(_events, naturalKeys)];
+        var schemas = new List<IFeatureSchema>
+        {
+            new EventStoreFeatureSchema(_events, naturalKeys)
+        };
+
+        if (_options.ExtendedSchemaObjects.Count > 0)
+        {
+            schemas.Add(new ExtendedObjectsFeatureSchema(_options.ExtendedSchemaObjects));
+        }
+
+        return schemas.ToArray();
     }
 
     public override DatabaseDescriptor Describe()
@@ -130,28 +140,14 @@ public class PolecatDatabase : DatabaseBase<SqlConnection>, IEventDatabase
             var seq = reader.GetInt64(1);
             var state = new ShardState(name, seq);
 
-            if (_events.EnableExtendedProgressionTracking)
-            {
-                if (!reader.IsDBNull(2))
-                {
-                    state.LastHeartbeat = reader.GetDateTimeOffset(2);
-                }
-
-                if (!reader.IsDBNull(3))
-                {
-                    state.AgentStatus = reader.GetString(3);
-                }
-
-                if (!reader.IsDBNull(4))
-                {
-                    state.PauseReason = reader.GetString(4);
-                }
-
-                if (!reader.IsDBNull(5))
-                {
-                    state.RunningOnNode = reader.GetInt32(5);
-                }
-            }
+            // TODO: Re-enable when JasperFx.Events ShardState gains these properties
+            // if (_events.EnableExtendedProgressionTracking)
+            // {
+            //     if (!reader.IsDBNull(2)) state.LastHeartbeat = reader.GetDateTimeOffset(2);
+            //     if (!reader.IsDBNull(3)) state.AgentStatus = reader.GetString(3);
+            //     if (!reader.IsDBNull(4)) state.PauseReason = reader.GetString(4);
+            //     if (!reader.IsDBNull(5)) state.RunningOnNode = reader.GetInt32(5);
+            // }
 
             list.Add(state);
         }

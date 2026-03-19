@@ -168,6 +168,13 @@ public class StoreOptions
     internal Dictionary<Type, Func<Internal.DocumentSessionBase, string, object>> CustomProjectionStorageProviders { get; } = new();
 
     /// <summary>
+    ///     Additional SQL Server tables to be managed by this DocumentStore alongside
+    ///     Polecat's own schema objects. Used by extensions like EF Core integration
+    ///     to register entity tables for Weasel schema migration.
+    /// </summary>
+    public List<Weasel.Core.ISchemaObject> ExtendedSchemaObjects { get; } = new();
+
+    /// <summary>
     ///     Replace the default Polly resilience pipeline with a custom one.
     /// </summary>
     public void ConfigurePolly(Action<ResiliencePipelineBuilder> configure)
