@@ -353,12 +353,22 @@ internal class QueryEventStore : IQueryEventStore
     public async ValueTask<T?> FetchLatest<T>(Guid id, CancellationToken cancellation = default)
         where T : class, new()
     {
+        if (_session.TryGetAggregateFromIdentityMap<T, Guid>(id, out var cached))
+        {
+            return cached;
+        }
+
         return await AggregateStreamAsync<T>(id, token: cancellation);
     }
 
     public async ValueTask<T?> FetchLatest<T>(string key, CancellationToken cancellation = default)
         where T : class, new()
     {
+        if (_session.TryGetAggregateFromIdentityMap<T, string>(key, out var cached))
+        {
+            return cached;
+        }
+
         return await AggregateStreamAsync<T>(key, token: cancellation);
     }
 

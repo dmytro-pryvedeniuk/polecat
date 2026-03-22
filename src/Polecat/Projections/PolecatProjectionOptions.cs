@@ -28,6 +28,17 @@ public class PolecatProjectionOptions
 
     internal void SetStoreOptions(StoreOptions options) => _storeOptions = options;
 
+    /// <summary>
+    ///     Opt into a performance optimization that directs Polecat to use a session-level
+    ///     identity map for aggregates fetched via FetchForWriting() or FetchLatest().
+    ///     See <see cref="EventGraph.UseIdentityMapForAggregates"/> for details.
+    /// </summary>
+    public bool UseIdentityMapForAggregates
+    {
+        get => _events.UseIdentityMapForAggregates;
+        set => _events.UseIdentityMapForAggregates = value;
+    }
+
     protected override void onAddProjection(object projection)
     {
         if (projection is ProjectionBase pb)

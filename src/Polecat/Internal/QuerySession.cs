@@ -26,6 +26,42 @@ internal partial class QuerySession : IQuerySession
     protected readonly EventGraph _eventGraph;
     private QueryEventStore? _events;
 
+    // Session-level aggregate identity map used when UseIdentityMapForAggregates is enabled.
+    // Mirrors Marten's ItemMap pattern: Dictionary<Type, object> where each value is
+    // a Dictionary<TId, TDoc> for the specific aggregate/id types.
+    internal Dictionary<Type, object> AggregateIdentityMap { get; } = new();
+
+    internal void StoreAggregateInIdentityMap<TDoc, TId>(TId id, TDoc document)
+        where TDoc : class where TId : notnull
+    {
+        if (AggregateIdentityMap.TryGetValue(typeof(TDoc), out var raw))
+        {
+            ((Dictionary<TId, TDoc>)raw)[id] = document;
+        }
+        else
+        {
+            var dict = new Dictionary<TId, TDoc> { [id] = document };
+            AggregateIdentityMap[typeof(TDoc)] = dict;
+        }
+    }
+
+    internal bool TryGetAggregateFromIdentityMap<TDoc, TId>(TId id, out TDoc? document)
+        where TDoc : class where TId : notnull
+    {
+        document = default;
+        if (!_eventGraph.UseIdentityMapForAggregates) return false;
+
+        if (AggregateIdentityMap.TryGetValue(typeof(TDoc), out var raw)
+            && raw is Dictionary<TId, TDoc> dict
+            && dict.TryGetValue(id, out var cached))
+        {
+            document = cached;
+            return true;
+        }
+
+        return false;
+    }
+
     public QuerySession(
         StoreOptions options,
         IConnectionLifetime lifetime,

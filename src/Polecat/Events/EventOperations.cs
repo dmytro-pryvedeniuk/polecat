@@ -475,6 +475,19 @@ internal class EventOperations : QueryEventStore, IEventOperations
                     if (aggregate != null) QueryEventStore.TrySetIdentity(aggregate, key);
                 }
             }
+
+            // Cache in session-level aggregate identity map if optimization is enabled
+            if (aggregate != null && _events.UseIdentityMapForAggregates)
+            {
+                if (streamId is Guid gid)
+                {
+                    _sessionBase.StoreAggregateInIdentityMap<T, Guid>(gid, aggregate);
+                }
+                else if (streamId is string skey)
+                {
+                    _sessionBase.StoreAggregateInIdentityMap<T, string>(skey, aggregate);
+                }
+            }
         }
 
         // Create the StreamAction

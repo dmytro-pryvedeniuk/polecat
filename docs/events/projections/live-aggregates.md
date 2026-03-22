@@ -48,6 +48,24 @@ If a snapshot exists for the stream, `AggregateStreamAsync` automatically uses i
 
 See [Snapshots](/events/snapshots) for details on configuring snapshot storage.
 
+## UseIdentityMapForAggregates
+
+Polecat offers a performance optimization that caches aggregates in a session-level identity map when using `FetchForWriting()`. When enabled, subsequent calls to `FetchLatest()` within the same session will return the cached instance instead of re-querying the database.
+
+```cs
+opts.Projections.UseIdentityMapForAggregates = true;
+```
+
+This is particularly valuable in CQRS command handlers that fetch an aggregate for writing, append events, and then need to return the updated aggregate state — avoiding a redundant database round trip.
+
+::: warning
+Only use this optimization if you are NOT mutating the aggregate outside of Polecat internals. This is safe with immutable event application patterns (Apply methods that set properties from event data).
+:::
+
+::: tip
+Unlike Marten, Polecat defaults to lightweight sessions (no identity map tracking). This optimization adds aggregate-specific caching on top of lightweight sessions without switching to full identity map sessions.
+:::
+
 ## Live vs Inline vs Async
 
 | Strategy | Consistency | Storage | Performance |

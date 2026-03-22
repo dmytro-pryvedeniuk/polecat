@@ -1,33 +1,15 @@
 services:
   sqlserver:
-    image: mcr.microsoft.com/mssql/server:2022-latest
-    platform: linux/amd64
+    image: "mcr.microsoft.com/azure-sql-edge:latest"
     container_name: polecat-sqlserver
     environment:
       ACCEPT_EULA: "Y"
-      MSSQL_SA_PASSWORD: "Polecat#Dev2025"
+      SA_PASSWORD: "P@55w0rd"
       MSSQL_PID: "Developer"
     ports:
       - "11433:1433"
     volumes:
       - sqlserver-data:/var/opt/mssql
-    healthcheck:
-      test: /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "Polecat#Dev2025" -C -Q "SELECT 1" -b
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
-
-  init-db:
-    image: mcr.microsoft.com/mssql/server:2022-latest
-    platform: linux/amd64
-    depends_on:
-      sqlserver:
-        condition: service_healthy
-    entrypoint: /opt/mssql-tools18/bin/sqlcmd
-    command: >
-      -S sqlserver -U sa -P "Polecat#Dev2025" -C
-      -Q "IF DB_ID('polecat_testing') IS NULL CREATE DATABASE polecat_testing;"
 
 volumes:
   sqlserver-data:

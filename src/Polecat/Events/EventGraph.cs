@@ -63,6 +63,16 @@ public class EventGraph : EventRegistry, IAggregationSourceFactory<IQuerySession
     /// </summary>
     public bool EnableExtendedProgressionTracking => _options.Events.EnableExtendedProgressionTracking;
 
+    /// <summary>
+    ///     Opt into a performance optimization that directs Polecat to use a session-level
+    ///     identity map for aggregates fetched via FetchForWriting() or FetchLatest().
+    ///     Subsequent calls to FetchLatest() within the same session will return the cached
+    ///     instance instead of re-querying the database.
+    ///     Note: only appropriate if using immutable aggregations or when you do not mutate
+    ///     the aggregate yourself outside of Polecat internals.
+    /// </summary>
+    public bool UseIdentityMapForAggregates { get; set; }
+
     internal string StreamsTableName => $"[{DatabaseSchemaName}].[pc_streams]";
     internal string EventsTableName => $"[{DatabaseSchemaName}].[pc_events]";
     internal string ProgressionTableName => $"[{DatabaseSchemaName}].[pc_event_progression]";
