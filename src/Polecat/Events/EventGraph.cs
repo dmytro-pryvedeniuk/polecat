@@ -129,8 +129,11 @@ public class EventGraph : EventRegistry, IAggregationSourceFactory<IQuerySession
     /// </summary>
     IAggregatorSource<IQuerySession>? IAggregationSourceFactory<IQuerySession>.Build<TDoc>()
     {
+        // Use the appropriate identity type based on stream identity configuration
+        var idType = StreamIdentity == StreamIdentity.AsGuid ? typeof(Guid) : typeof(string);
+        var projectionType = typeof(SingleStreamProjection<,>).MakeGenericType(typeof(TDoc), idType);
 #pragma warning disable CS8714 // notnull constraint mismatch
-        var projection = new SingleStreamProjection<TDoc>();
+        var projection = (ProjectionBase)Activator.CreateInstance(projectionType)!;
 #pragma warning restore CS8714
         projection.Lifecycle = ProjectionLifecycle.Live;
         projection.AssembleAndAssertValidity();

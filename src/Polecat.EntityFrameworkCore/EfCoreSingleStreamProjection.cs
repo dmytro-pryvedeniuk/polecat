@@ -17,7 +17,7 @@ namespace Polecat.EntityFrameworkCore;
 /// <typeparam name="TDoc">The aggregate document type (EF Core entity).</typeparam>
 /// <typeparam name="TDbContext">The EF Core DbContext type.</typeparam>
 public abstract class EfCoreSingleStreamProjection<TDoc, TDbContext>
-    : SingleStreamProjection<TDoc>, IValidatedProjection<StoreOptions>
+    : SingleStreamProjection<TDoc, Guid>, IValidatedProjection<StoreOptions>
     where TDoc : class
     where TDbContext : DbContext
 {

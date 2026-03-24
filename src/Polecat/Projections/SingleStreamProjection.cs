@@ -9,7 +9,7 @@ namespace Polecat.Projections;
 ///
 ///     Usage:
 ///     <code>
-///     public class QuestPartyProjection : SingleStreamProjection&lt;QuestParty&gt;
+///     public class QuestPartyProjection : SingleStreamProjection&lt;QuestParty, Guid&gt;
 ///     {
 ///         public static QuestParty Create(QuestStarted e) => new() { Name = e.Name };
 ///         public void Apply(MembersJoined e, QuestParty party) => party.Members.AddRange(e.Members);
@@ -17,9 +17,11 @@ namespace Polecat.Projections;
 ///     }
 ///     </code>
 /// </summary>
-/// <typeparam name="TDoc">The aggregate document type. Must have a Guid Id property.</typeparam>
-public class SingleStreamProjection<TDoc>
-    : JasperFxSingleStreamProjectionBase<TDoc, Guid, IDocumentSession, IQuerySession>
+/// <typeparam name="TDoc">The aggregate document type.</typeparam>
+/// <typeparam name="TId">The stream identity type (typically Guid or string).</typeparam>
+public class SingleStreamProjection<TDoc, TId>
+    : JasperFxSingleStreamProjectionBase<TDoc, TId, IDocumentSession, IQuerySession>
     where TDoc : notnull
+    where TId : notnull
 {
 }

@@ -56,13 +56,14 @@ public class PolecatProjectionOptions
     }
 
     /// <summary>
-    ///     Register a self-aggregating type for snapshot projection.
+    ///     Register a self-aggregating type for snapshot projection with explicit identity type.
     ///     The aggregate type must have Apply/Create methods matching event types.
     /// </summary>
-    public void Snapshot<T>(SnapshotLifecycle lifecycle)
+    public void Snapshot<T, TId>(SnapshotLifecycle lifecycle)
         where T : notnull, new()
+        where TId : notnull
     {
-        var projection = new SingleStreamProjection<T>();
+        var projection = new SingleStreamProjection<T, TId>();
         var mapped = lifecycle.Map();
         projection.Lifecycle = mapped;
         projection.AssembleAndAssertValidity();
@@ -73,6 +74,17 @@ public class PolecatProjectionOptions
         }
 
         All.Add((IProjectionSource<IDocumentSession, IQuerySession>)projection);
+    }
+
+    /// <summary>
+    ///     Register a self-aggregating type for snapshot projection.
+    ///     Uses Guid as the default stream identity type.
+    ///     The aggregate type must have Apply/Create methods matching event types.
+    /// </summary>
+    public void Snapshot<T>(SnapshotLifecycle lifecycle)
+        where T : notnull, new()
+    {
+        Snapshot<T, Guid>(lifecycle);
     }
 
     /// <summary>

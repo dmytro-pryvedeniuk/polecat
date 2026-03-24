@@ -45,7 +45,51 @@ internal class PolecatProjectionStorage<TDoc, TId> : IProjectionStorage<TDoc, TI
 
     public TId Identity(TDoc document)
     {
-        return (TId)_provider.Mapping.GetId(document);
+        var rawId = _provider.Mapping.GetId(document);
+
+        // If TId is the inner type (e.g., Guid/string) but GetId returned the unwrapped value, cast directly
+        if (rawId is TId typedId)
+        {
+            return typedId;
+        }
+
+        // If TId is a wrapper type (e.g., PaymentId) and GetId returned the inner value,
+        // wrap it back up
+        if (_provider.Mapping.ValueTypeId != null)
+        {
+            object wrapped;
+            if (_provider.Mapping.ValueTypeId.Ctor != null)
+            {
+                wrapped = _provider.Mapping.ValueTypeId.Ctor.Invoke([rawId]);
+            }
+            else
+            {
+                wrapped = _provider.Mapping.ValueTypeId.Builder!.Invoke(null, [rawId])!;
+            }
+
+            return (TId)wrapped;
+        }
+
+        return (TId)rawId;
+    }
+
+    /// <summary>
+    ///     Unwrap a strongly-typed ID to its inner value for use as a SQL parameter.
+    ///     If the ID is not a value type wrapper, returns it unchanged.
+    /// </summary>
+    private object UnwrapId(TId id)
+    {
+        if (_provider.Mapping.ValueTypeId != null)
+        {
+            // Only unwrap if id is actually the wrapper type (not already the inner type)
+            var wrapperType = Nullable.GetUnderlyingType(_provider.Mapping.IdType) ?? _provider.Mapping.IdType;
+            if (id.GetType() == wrapperType)
+            {
+                return _provider.Mapping.ValueTypeId.ValueProperty.GetValue(id)!;
+            }
+        }
+
+        return id;
     }
 
     public void Store(TDoc snapshot)
@@ -116,7 +160,7 @@ internal class PolecatProjectionStorage<TDoc, TId> : IProjectionStorage<TDoc, TI
 
         await using var cmd = new SqlCommand();
         cmd.CommandText = _provider.LoadSql;
-        cmd.Parameters.AddWithValue("@id", (object)id);
+        cmd.Parameters.AddWithValue("@id", UnwrapId(id));
         cmd.Parameters.AddWithValue("@tenant_id", TenantId);
 
         await using var reader = await _session.ExecuteReaderAsync(cmd, cancellation);
@@ -143,7 +187,7 @@ internal class PolecatProjectionStorage<TDoc, TId> : IProjectionStorage<TDoc, TI
         for (var i = 0; i < identities.Length; i++)
         {
             paramNames[i] = $"@id{i}";
-            cmd.Parameters.AddWithValue(paramNames[i], (object)identities[i]);
+            cmd.Parameters.AddWithValue(paramNames[i], UnwrapId(identities[i]));
         }
 
         var softDeleteFilter = _provider.Mapping.DeleteStyle == DeleteStyle.SoftDelete

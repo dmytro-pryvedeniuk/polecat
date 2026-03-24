@@ -13,6 +13,7 @@
         <PackageReference Include="Microsoft.Extensions.Hosting" />
         <PackageReference Include="xunit.runner.visualstudio" />
         <PackageReference Include="Microsoft.CodeAnalysis.CSharp" />
+        <PackageReference Include="StronglyTypedId" />
     </ItemGroup>
 
     <ItemGroup>

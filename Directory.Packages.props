@@ -31,6 +31,9 @@
         <PackageVersion Include="Weasel.EntityFrameworkCore" Version="8.10.1" />
         <PackageVersion Include="Weasel.SqlServer" Version="8.10.1" />
 
+        <!-- Strongly typed IDs -->
+        <PackageVersion Include="StronglyTypedId" Version="1.0.0-beta08" />
+
         <!-- Source generators -->
         <PackageVersion Include="JasperFx.Events.SourceGenerator" Version="1.3.0" />
     </ItemGroup>

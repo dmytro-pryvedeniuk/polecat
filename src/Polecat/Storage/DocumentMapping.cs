@@ -29,10 +29,13 @@ internal class DocumentMapping
 
         IdType = _idProperty.PropertyType;
 
-        if (!SupportedIdTypes.Contains(IdType))
+        // Unwrap Nullable<T> for strongly-typed ID detection (e.g., PaymentId? -> PaymentId)
+        var idTypeToCheck = Nullable.GetUnderlyingType(IdType) ?? IdType;
+
+        if (!SupportedIdTypes.Contains(idTypeToCheck))
         {
             // Check for strongly typed ID wrapper (e.g., record struct OrderId(Guid Value))
-            ValueTypeId = TryResolveValueTypeId(IdType);
+            ValueTypeId = TryResolveValueTypeId(idTypeToCheck);
             if (ValueTypeId == null)
             {
                 throw new InvalidOperationException(
@@ -242,6 +245,15 @@ internal class DocumentMapping
     {
         if (ValueTypeId != null)
         {
+            // If id is already the wrapper type (e.g., PaymentId), use it directly
+            var idActualType = id.GetType();
+            var wrapperType = Nullable.GetUnderlyingType(IdType) ?? IdType;
+            if (idActualType == wrapperType)
+            {
+                _idProperty.SetValue(document, id);
+                return;
+            }
+
             // Wrap: Guid → OrderId
             object wrapped;
             if (ValueTypeId.Ctor != null)
