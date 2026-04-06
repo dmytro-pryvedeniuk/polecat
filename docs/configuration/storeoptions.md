@@ -48,6 +48,16 @@ All Polecat tables use the `pc_` prefix:
 - `pc_hilo` -- HiLo sequence storage
 - `pc_doc_{typename}` -- Document tables
 
+## Native JSON Column Type
+
+By default, Polecat uses SQL Server 2025's native `json` data type for document bodies, event data, headers, and snapshots. To fall back to `nvarchar(max)` for pre-2025 SQL Server instances:
+
+```cs
+opts.UseNativeJsonType = false;
+```
+
+See [JSON Serialization](/configuration/json#falling-back-to-nvarcharmax) for more details.
+
 ## Store Policies
 
 Apply policies across all document types:

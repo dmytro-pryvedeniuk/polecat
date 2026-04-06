@@ -61,7 +61,7 @@ opts.UseSystemTextJsonSerializerOptions(o =>
 
 ## SQL Server 2025 JSON Type
 
-Polecat stores all document bodies and event data using SQL Server 2025's native `json` data type. This provides:
+Polecat stores all document bodies and event data using SQL Server 2025's native `json` data type by default. This provides:
 
 - Native JSON validation at the database level
 - Efficient JSON path queries via `JSON_VALUE()` and `JSON_QUERY()`
@@ -71,3 +71,13 @@ Polecat stores all document bodies and event data using SQL Server 2025's native
 ::: tip
 The `json` type in SQL Server 2025 is analogous to PostgreSQL's `jsonb` type used by Marten, but without the binary storage optimization.
 :::
+
+### Falling Back to nvarchar(max)
+
+If you are running against a pre-2025 SQL Server instance that does not support the native `json` data type, disable it with:
+
+```cs
+opts.UseNativeJsonType = false;
+```
+
+When set to `false`, Polecat uses `nvarchar(max)` for all JSON columns instead. All JSON querying, patching, and projection features continue to work identically with either column type.
