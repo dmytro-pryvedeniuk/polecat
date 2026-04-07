@@ -68,3 +68,60 @@ public void Project(IEvent<UserDeactivated> @event, IDocumentOperations ops)
         .Set(x => x.IsActive, false);
 }
 ```
+
+## Event Enrichment
+
+`EventProjection` supports an `EnrichEventsAsync` hook that runs **before** individual events
+are processed. This allows you to batch-load reference data from the database and enrich events
+with it, avoiding N+1 query problems.
+
+::: warning
+Event enrichment is designed for **read model / query model** projections processed by the async
+daemon or inline during `SaveChangesAsync`. It is **not** called during `FetchForWriting()` or
+`FetchLatest()`. Avoid depending on enriched data in write model aggregates used with those APIs.
+:::
+
+Override `EnrichEventsAsync` in your `EventProjection` subclass:
+
+```cs
+public class TaskSummaryProjection : EventProjection
+{
+    public TaskSummaryProjection()
+    {
+        Project<TaskAssigned>((e, ops) =>
+        {
+            ops.Store(new TaskSummary
+            {
+                Id = e.TaskId,
+                AssignedUserName = e.UserName // Set by enrichment
+            });
+        });
+    }
+
+    public override async Task EnrichEventsAsync(
+        IQuerySession querySession,
+        IReadOnlyList<IEvent> events,
+        CancellationToken cancellation)
+    {
+        var assigned = events.OfType<IEvent<TaskAssigned>>().ToArray();
+        if (assigned.Length == 0) return;
+
+        var userIds = assigned.Select(e => e.Data.UserId).Distinct().ToArray();
+
+        foreach (var userId in userIds)
+        {
+            var user = await querySession.LoadAsync<User>(userId, cancellation);
+            if (user != null)
+            {
+                foreach (var e in assigned.Where(a => a.Data.UserId == userId))
+                {
+                    e.Data.UserName = user.Name;
+                }
+            }
+        }
+    }
+}
+```
+
+The method is called once per tenant batch before any `Project<T>` handlers run. Modifications
+to event data properties are visible to all subsequent handlers in the batch.
