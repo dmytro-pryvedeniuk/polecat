@@ -165,11 +165,15 @@ public class async_daemon_tests : OneOffConfigurationsContext
             new MembersJoined(1, "Town B", ["B1"]));
         await session.SaveChangesAsync();
 
-        await store.WaitForProjectionAsync();
-
+        QuestParty? party1 = null;
+        QuestParty? party2 = null;
         await using var query = store.QuerySession();
-        var party1 = await query.LoadAsync<QuestParty>(stream1);
-        var party2 = await query.LoadAsync<QuestParty>(stream2);
+        await store.WaitForConditionAsync(async () =>
+        {
+            party1 = await query.LoadAsync<QuestParty>(stream1);
+            party2 = await query.LoadAsync<QuestParty>(stream2);
+            return party1 != null && party2 != null;
+        }, TimeSpan.FromMinutes(5));
 
         party1.ShouldNotBeNull();
         party1.Name.ShouldBe("Quest Alpha");

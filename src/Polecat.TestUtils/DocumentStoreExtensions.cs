@@ -10,13 +10,13 @@ public static class DocumentStoreExtensions
         {
             const int maxRetries = 3;
             using var daemon = await Store.BuildProjectionDaemonAsync();
-            await daemon.StartAllAsync();
 
             // Retry on transient SQL Server connection errors from daemon internals
             for (var attempt = 0; attempt < maxRetries; attempt++)
             {
                 try
                 {
+                    await daemon.StartAllAsync();
                     await daemon.CatchUpAsync(TimeSpan.FromSeconds(30), CancellationToken.None);
                     return;
                 }
@@ -28,6 +28,21 @@ public static class DocumentStoreExtensions
                     else
                         throw;
                 }
+            }
+        }
+
+        public async Task WaitForConditionAsync(Func<Task<bool>> predicate, TimeSpan timeout)
+        {
+            if (await predicate())
+                return;
+
+            using var daemon = await Store.BuildProjectionDaemonAsync();
+            var cts = new CancellationTokenSource(timeout);
+
+            while (!await predicate())
+            {
+                await daemon.StartAllAsync();
+                await Task.Delay(500, cts.Token);
             }
         }
 
