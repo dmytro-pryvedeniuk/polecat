@@ -2,7 +2,7 @@
 
 SQL Server-Backed Event Store inside the Critter Stack.
 
-[Polecat](https://polecat.netlify.app/) is live and ready for real usage! See [Jeremy's announcement on the 1.0 release](https://jeremydmiller.com/2026/03/22/announcing-polecat-event-sourcing-with-sql-server/).
+[Polecat](https://polecat.jasperfx.net/) is live and ready for real usage! See [Jeremy's announcement on the 1.0 release](https://jeremydmiller.com/2026/03/22/announcing-polecat-event-sourcing-with-sql-server/).
 
 [![Discord](https://img.shields.io/discord/1074998995086225460?color=blue&label=Chat%20on%20Discord)](https://discord.gg/WMxrvegf8H)
 [![Nuget Package](https://badgen.net/nuget/v/polecat)](https://www.nuget.org/packages/Polecat/)
